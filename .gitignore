@@ -5,6 +5,7 @@
 *.zarr/
 *.zarr
 *.csv
+*.pkl
 *.png
 *.html
 *.pt
