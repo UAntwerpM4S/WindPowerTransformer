@@ -20,6 +20,7 @@
 conda_envs/
 .vscode/
 .venv/
+artifacts/*
 
 # Python
 __pycache__/
