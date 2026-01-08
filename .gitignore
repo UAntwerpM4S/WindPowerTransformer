@@ -1,0 +1,26 @@
+#Data 
+*.nc
+*.grib
+*.grib.*
+*.zarr/
+*.zarr
+*.csv
+*.png
+*.html
+*.pt
+*.pyc
+
+#Checkpoints
+*.ckp
+
+
+#Folders
+.ipynb_checkpoints/
+conda_envs/
+.vscode/
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
