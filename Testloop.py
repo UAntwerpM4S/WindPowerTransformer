@@ -11,14 +11,14 @@ import re
 from Transformer import TemporalTransformer
 
 # ======== USER CONFIG ========
-MODEL_NAMES = ["GraphTransformer"]  # folders under checkpoints/
+MODEL_NAMES = ["GraphTransformer","GNN","Transformer"]  # folders under checkpoints/
 INPUT_DIM   = 6
 MODEL_DIM   = 128
 N_HEADS     = 4
 NUM_LAYERS  = 4
 MLP_MULT    = 4
 BATCH_SIZE  = 8
-OUT_DIR     = "forecast_netcdfs"
+OUT_DIR     = "TEST_FCS"
 # =============================
 
 os.makedirs(OUT_DIR, exist_ok=True)
@@ -104,37 +104,26 @@ def main():
 
             # Load weights
             model = base_model
-            try:
-                state = torch.load(ckpt_path, map_location=device,weights_only=True)
-                model.load_state_dict(state)
-            except Exception as e:
-                print(f"❌ Failed to load weights from {ckpt_path}: {e}")
-                continue
+            state = torch.load(ckpt_path, map_location=device,weights_only=True)
+            model.load_state_dict(state)
+
 
             # Build / get test loader for this (model, windpark)
             cache_key = (model_name, windpark)
             if cache_key not in loader_cache:
-                try:
-                    _, _, test_loader = loader_prepare(
-                        batch_size=BATCH_SIZE,
-                        model_name=model_name,
-                        windpark=windpark,
-                    )
-                except Exception as e:
-                    print(f"❌ Failed to build test loader for {cache_key}: {e}")
-                    continue
-                loader_cache[cache_key] = test_loader
+                _, _, test_loader = loader_prepare(
+                    batch_size=BATCH_SIZE,
+                    model_name=model_name,
+                    windpark=windpark,
+                    fcs_dir= "/mnt/weatherloss/WindPowerTransformer/data/FCS/" + model_name
+                )
+
             else:
                 test_loader = loader_cache[cache_key]
 
             # Inference
             preds, truths = run_inference_to_arrays(model, test_loader)
-            if preds is None:
-                print("⚠️ No test batches produced outputs; skipping.")
-                continue
 
-            # Coords: date & lead_time
-            # Coords: date & lead_time
             n_samples, T = preds.shape
 
             date_strs = all_test_dates[:n_samples]

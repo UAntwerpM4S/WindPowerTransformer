@@ -1,4 +1,6 @@
 import os
+from pathlib import Path
+
 
 windparks = ['Belwind Phase 1', 'Thorntonbank - C-Power - Area NE',
        'Thorntonbank - C-Power - Area SW', 'Mermaid Offshore WP',
@@ -6,7 +8,7 @@ windparks = ['Belwind Phase 1', 'Thorntonbank - C-Power - Area NE',
        'Northwind', 'Rentel Offshore WP', 'Seastar Offshore WP']
 
 model_names = ["GraphTransformer","Transformer","GNN"]
-model_dim = 64
+model_dim = 128
 n_heads = 4
 num_layers = 4 
 
@@ -22,7 +24,8 @@ base_command = (
     "--epochs 25 "
     "--lr 0.001 "
     "--patience 5 "
-    "--windpark \"{windpark}\""
+    "--windpark \"{windpark}\" "
+    "--fcs_dir {fcs_dir}" 
 )
 
 FCS_BASE_DIR = Path("/mnt/weatherloss/WindPowerTransformer/data/FCS")
@@ -35,6 +38,7 @@ for model_name in model_names:
                 model_dim=model_dim,
                 n_heads=n_heads,
                 num_layers=num_layers,
-                windpark=windpark)
+                windpark=windpark,
+                fcs_dir = fcs_dir)
         print(f"\n🚀 Running: {cmd}")
         os.system(cmd)

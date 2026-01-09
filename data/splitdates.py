@@ -3,7 +3,7 @@ import glob
 import pickle
 from datetime import datetime
 
-fcs_dir = "FCS"
+fcs_dir = "FCS/GraphTransformer"
 obs_dir = "OBS"  # not used below, but kept for completeness
 
 # Get list of forecast files

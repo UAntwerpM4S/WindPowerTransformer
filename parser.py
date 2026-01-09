@@ -8,6 +8,7 @@ def get_args():
     parser.add_argument("--input_dim", type=int, default=6, help="Input feature dimension")
     parser.add_argument('--windpark', type=str, default="Belwind Phase 1",
                     help="Windpark name to train the model on")
+    parser.add_argument("--fcs_dir" ,type=str, default="GraphTransformer")
 
 
     # Transformer architecture

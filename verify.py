@@ -4,165 +4,101 @@ import glob
 import numpy as np
 import xarray as xr
 import matplotlib.pyplot as plt
+import pandas as pd
 
 # ========= CONFIG =========
-MODEL_NAME = "GraphTransformer"
+MODEL_NAMES = ["GraphTransformer", "GNN", "Transformer"]
+
 DIM = 128
 HEADS = 4
 LAYERS = 4
 
-TOTAL_CAPACITY_MW = 2262.0  # used to convert MW -> % of capacity
+TOTAL_CAPACITY_MW = 2262.0
 
-TRANSFORMER_DIR = "forecast_netcdfs"
-POWERCURVE_DIR  = "forecast_netcdfs_powercurve_obs"
+TEST_FCS_DIR   = "TEST_FCS"
+POWERCURVE_DIR = "PC_FCS"
 RESULTS_DIR = "results"
 os.makedirs(RESULTS_DIR, exist_ok=True)
-
-# Transformer file pattern (matches your existing naming)
-TRANSFORMER_PATTERN = os.path.join(
-    TRANSFORMER_DIR,
-    f"{MODEL_NAME}_dim{DIM}_heads{HEADS}_layers{LAYERS}_*.nc"
-)
-
-# Power-curve file pattern (matches OUT_PREFIX = f"{MODEL_NAME}_PowerCurve_")
-POWERCURVE_PATTERN = os.path.join(
-    POWERCURVE_DIR,
-    f"{MODEL_NAME}_PowerCurve_*.nc"
-)
 # ==========================
 
 
-def _sum_over_windparks(nc_files):
-    """Return summed forecast/truth DataArrays (date, lead_time) across all provided files."""
-    if not nc_files:
-        return None, None, None
-
-    summed_f = None
-    summed_t = None
-    lead_time = None
-
-    for fp in nc_files:
+def _sum_over_windparks(files):
+    f_sum = t_sum = None
+    for fp in files:
         ds = xr.open_dataset(fp)
-
-        if "forecast" not in ds or "truth" not in ds:
-            print(f"⚠️ Skipping (missing forecast/truth): {fp}")
-            ds.close()
-            continue
-
-        f = ds["forecast"].astype(np.float64)
-        t = ds["truth"].astype(np.float64)
-
-        # First file initializes
-        if summed_f is None:
-            summed_f = f
-            summed_t = t
-            lead_time = ds["lead_time"].values if "lead_time" in ds.coords else np.arange(f.shape[1])
+        f = ds["forecast"].astype(float)
+        t = ds["truth"].astype(float)
+        if f_sum is None:
+            f_sum, t_sum = f, t
         else:
-            # Align by common coords (date, lead_time) before summing
-            f, summed_f = xr.align(f, summed_f, join="inner")
-            t, summed_t = xr.align(t, summed_t, join="inner")
-            summed_f = summed_f + f
-            summed_t = summed_t + t
-
+            f, f_sum = xr.align(f, f_sum, join="inner")
+            t, t_sum = xr.align(t, t_sum, join="inner")
+            f_sum += f
+            t_sum += t
         ds.close()
-
-    if summed_f is None:
-        return None, None, None
-
-    # Final alignment safety
-    summed_f, summed_t = xr.align(summed_f, summed_t, join="inner")
-    lead_time = summed_f["lead_time"].values if "lead_time" in summed_f.coords else lead_time
-    return summed_f, summed_t, lead_time
+    return xr.align(f_sum, t_sum, join="inner")
 
 
-def _metrics_pct(summed_f, summed_t):
-    """Compute MAE% and RMSE% vs lead_time."""
-    err = (summed_f - summed_t)
-
-    # If any NaNs exist, these will propagate; use skipna=True if needed.
-    mae_mw  = np.abs(err).mean(dim="date", skipna=True).values
-    rmse_mw = np.sqrt((err ** 2).mean(dim="date", skipna=True)).values
-
-    mae_pct  = (mae_mw  / TOTAL_CAPACITY_MW) * 100.0
-    rmse_pct = (rmse_mw / TOTAL_CAPACITY_MW) * 100.0
-    return mae_pct, rmse_pct
-
-
-def _save_two_line_plot(x, y1, y2, label1, label2, title, ylabel, out_path):
-    plt.figure(figsize=(12, 5))
-    plt.plot(x, y1, marker="o", markersize=4, linewidth=2, label=label1)
-    plt.plot(x, y2, marker="o", markersize=4, linewidth=2, label=label2)
-    plt.title(title, fontsize=18)
-    plt.xlabel("Lead Time [h]", fontsize=16)
-    plt.ylabel(ylabel, fontsize=16)
-    plt.xticks(fontsize=14)
-    plt.yticks(fontsize=14)
-    plt.grid(True)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(out_path)
-    plt.close()
+def _rmse_pct(f, t):
+    err = f - t
+    rmse = np.sqrt((err ** 2).mean(dim="date", skipna=True)).values
+    return (rmse / TOTAL_CAPACITY_MW) * 100.0
 
 
 def main():
-    transformer_files = sorted(glob.glob(TRANSFORMER_PATTERN))
-    powercurve_files  = sorted(glob.glob(POWERCURVE_PATTERN))
+    plt.figure(figsize=(12, 5))
 
-    if not transformer_files:
-        raise FileNotFoundError(f"No transformer NetCDFs found:\n  {TRANSFORMER_PATTERN}")
-    if not powercurve_files:
-        raise FileNotFoundError(f"No power-curve NetCDFs found:\n  {POWERCURVE_PATTERN}")
+    for model in MODEL_NAMES:
+        tf_files = sorted(glob.glob(
+            f"{TEST_FCS_DIR}/{model}_dim{DIM}_heads{HEADS}_layers{LAYERS}_*.nc"
+        ))
+        pc_files = sorted(glob.glob(
+            f"{POWERCURVE_DIR}/{model}/{model}_PowerCurve_*.nc"
+        ))
 
-    print(f"Found {len(transformer_files)} transformer files")
-    print(f"Found {len(powercurve_files)} power-curve files")
+        tf_f, tf_t = _sum_over_windparks(tf_files)
+        pc_f, pc_t = _sum_over_windparks(pc_files)
 
-    # --- Aggregate totals ---
-    tf_f, tf_t, tf_lt = _sum_over_windparks(transformer_files)
-    pc_f, pc_t, pc_lt = _sum_over_windparks(powercurve_files)
+        tf_f, tf_t, pc_f, pc_t = xr.align(tf_f, tf_t, pc_f, pc_t, join="inner")
 
-    if tf_f is None:
-        raise RuntimeError("No valid transformer NetCDFs were loaded.")
-    if pc_f is None:
-        raise RuntimeError("No valid power-curve NetCDFs were loaded.")
+        lt_steps = tf_f["lead_time"].values
+        lt_hours = lt_steps * 3
 
-    # --- Ensure both approaches share the same lead_times and dates for fair comparison ---
-    tf_f, tf_t, pc_f, pc_t = xr.align(tf_f, tf_t, pc_f, pc_t, join="inner")
+        rmse_tf = _rmse_pct(tf_f, tf_t)
+        rmse_pc = _rmse_pct(pc_f, pc_t)
 
-    # lead_time in your plotting code is step index; convert to hours (3h increments)
-    lt_steps = tf_f["lead_time"].values
-    lt_hours = lt_steps * 3
+        # ---- plot ----
+        plt.plot(lt_hours, rmse_tf, linewidth=2, label=f"{model} (TEST_FCS)")
+        plt.plot(lt_hours, rmse_pc, linewidth=2, linestyle="--", label=f"{model} (PowerCurve)")
 
-    # --- Metrics (% of capacity) ---
-    tf_mae_pct, tf_rmse_pct = _metrics_pct(tf_f, tf_t)
-    pc_mae_pct, pc_rmse_pct = _metrics_pct(pc_f, pc_t)
+        # ---- CSV ----
+        df = pd.DataFrame({
+            "lead_time_hours": lt_hours,
+            "rmse_test_fcs_pct": rmse_tf,
+            "rmse_powercurve_pct": rmse_pc,
+        })
+        csv_path = os.path.join(
+            RESULTS_DIR,
+            f"RMSE_{model}_dim{DIM}_heads{HEADS}_layers{LAYERS}.csv",
+        )
+        df.to_csv(csv_path, index=False)
 
-    base = f"{MODEL_NAME}_dim{DIM}_heads{HEADS}_layers{LAYERS}"
-    out_mae = os.path.join(RESULTS_DIR, f"Compare_MAE_PCT_{base}.png")
-    out_rmse = os.path.join(RESULTS_DIR, f"Compare_RMSE_PCT_{base}.png")
+    plt.title("Aggregated Offshore RMSE vs Lead Time", fontsize=18)
+    plt.xlabel("Lead Time [h]", fontsize=16)
+    plt.ylabel("RMSE [% of capacity]", fontsize=16)
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
 
-    _save_two_line_plot(
-        lt_hours,
-        tf_mae_pct, pc_mae_pct,
-        label1="Transformer", label2="Power curve",
-        title="Aggregated Offshore MAE vs Lead Time",
-        ylabel="MAE [% of capacity]",
-        out_path=out_mae,
+    out_png = os.path.join(
+        RESULTS_DIR,
+        f"Compare_RMSE_PCT_6lines_dim{DIM}_heads{HEADS}_layers{LAYERS}.png",
     )
+    plt.savefig(out_png)
+    plt.close()
 
-    _save_two_line_plot(
-        lt_hours,
-        tf_rmse_pct, pc_rmse_pct,
-        label1="Transformer", label2="Power curve",
-        title="Aggregated Offshore RMSE vs Lead Time",
-        ylabel="RMSE [% of capacity]",
-        out_path=out_rmse,
-    )
-
-    print("✅ Done.")
-    print(f"Saved: {out_mae}")
-    print(f"Saved: {out_rmse}")
-    print(f"Mean MAE%  - Transformer: {np.mean(tf_mae_pct):.3f}%, PowerCurve: {np.mean(pc_mae_pct):.3f}%")
-    print(f"Mean RMSE% - Transformer: {np.mean(tf_rmse_pct):.3f}%, PowerCurve: {np.mean(pc_rmse_pct):.3f}%")
+    print(f"✅ Saved plot: {out_png}")
+    print(f"✅ Saved CSVs in: {RESULTS_DIR}")
 
 
 if __name__ == "__main__":
