@@ -15,9 +15,9 @@ METADATA_CSV = Path("/mnt/weatherloss/WindPower/data/NorthSea/Power/windfarm_met
 OUT_BASE_DIR = Path("/mnt/weatherloss/WindPowerTransformer/data/FCS")
 
 MODELS = {
-    "GraphTransformer": "GraphTransformer",
-    "Transformer": "Transformer",
-    "GNN": "GNN",
+    "GraphTransformer": "GraphTransformerNew",
+    "Transformer": "TransformerNew",
+    "GNN": "GNNNew",
 }
 
 # Variables we want in the output files

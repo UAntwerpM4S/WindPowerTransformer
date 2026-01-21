@@ -123,6 +123,7 @@ def main():
                 f"layers{args.num_layers}_"
                 f"mlp{args.mlp_mult}_"
                 f"lr{args.lr}_"
+                f"FULL"
                 f"ep{args.epochs}.pt"
             )
 
