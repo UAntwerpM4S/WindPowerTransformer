@@ -54,7 +54,7 @@ class WindRampDataset(Dataset):
         keep_hourly_only=True,  # keeps 0,3,6,... too since they are integers
     ):
         with open(date_file, "rb") as f:
-            self.dates = pickle.load(f)
+            all_dates = pickle.load(f)
 
         self.fcs_dir = fcs_dir
         self.obs_dir = obs_dir
@@ -62,6 +62,15 @@ class WindRampDataset(Dataset):
         self.windpark = windpark
         self.features = list(features)
         self.keep_hourly_only = keep_hourly_only
+
+        # Filter out dates where files are missing
+        self.dates = [
+            d for d in all_dates
+            if os.path.exists(os.path.join(fcs_dir, f"fcs.{d}.nc"))
+            and os.path.exists(os.path.join(obs_dir, f"obs.{d}.nc"))
+        ]
+        if len(self.dates) < len(all_dates):
+            print(f"Warning: skipped {len(all_dates) - len(self.dates)} dates with missing files.")
 
         # Load train-only stats for THIS (model, park)
         p = stats_path(model_name, windpark)
