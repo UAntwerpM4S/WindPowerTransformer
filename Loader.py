@@ -114,8 +114,8 @@ class WindRampDataset(Dataset):
         X = _interp2d_time_lastdim(X)
 
         return (
-            torch.from_numpy(X),
-            torch.from_numpy(y),
+            torch.tensor(X, dtype=torch.float32),
+            torch.tensor(y, dtype=torch.float32),
         )
 
 
