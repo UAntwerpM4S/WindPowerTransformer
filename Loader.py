@@ -81,41 +81,41 @@ class WindRampDataset(Dataset):
         fcs_path = os.path.join(self.fcs_dir, f"fcs.{init_str}.nc")
         obs_path = os.path.join(self.obs_dir, f"obs.{init_str}.nc")
 
-        fcs = xr.open_dataset(fcs_path).sel(model=self.model_name, windpark=self.windpark).squeeze()
-        obs = xr.open_dataset(obs_path).sel(windpark=self.windpark).squeeze()
+        with xr.open_dataset(fcs_path) as fcs_ds, xr.open_dataset(obs_path) as obs_ds:
+            fcs = fcs_ds.sel(model=self.model_name, windpark=self.windpark).squeeze()
+            obs = obs_ds.sel(windpark=self.windpark).squeeze()
 
-        # Keep only integer-hour lead times (keeps 3-hourly too)
-        if self.keep_hourly_only:
-            hourly = (fcs["lead_time"] % 1.0 == 0)
-            fcs = fcs.sel(lead_time=hourly)
-            obs = obs.sel(lead_time=hourly)
+            # Keep only integer-hour lead times (keeps 3-hourly too)
+            if self.keep_hourly_only:
+                hourly = (fcs["lead_time"] % 1.0 == 0)
+                fcs = fcs.sel(lead_time=hourly)
+                obs = obs.sel(lead_time=hourly)
 
-        # Build features (standardize ws10/ws100; sin/cos are already [-1, 1])
-        feat_list = []
-        for var in self.features:
-            arr = fcs[var].values.astype(np.float32)  # (T,)
+            # Build features (standardize ws10/ws100; sin/cos are already [-1, 1])
+            feat_list = []
+            for var in self.features:
+                arr = fcs[var].values.astype(np.float32).copy()  # (T,)
 
-            if var in ("ws10", "ws100"):
-                mu = float(self.stats[var]["mean"])
-                sd = float(self.stats[var]["std"])
-                arr = (arr - mu) / max(sd, 1e-6)
+                if var in ("ws10", "ws100"):
+                    mu = float(self.stats[var]["mean"])
+                    sd = float(self.stats[var]["std"])
+                    arr = (arr - mu) / max(sd, 1e-6)
 
-            feat_list.append(arr)
+                feat_list.append(arr)
 
-        X = np.stack(feat_list, axis=-1)  # (T, F)
+            X = np.stack(feat_list, axis=-1)  # (T, F)
 
+            y = obs["WP"].values.astype(np.float32).copy()  # (T,)
 
-        y = obs["WP"].values.astype(np.float32)  # (T,)
         target_finite = np.isfinite(y)
         inputs_finite = np.all(np.isfinite(X), axis=-1)
 
         # Impute inputs so the model never sees NaNs/Infs
         X = _interp2d_time_lastdim(X)
 
-
         return (
-            torch.tensor(X, dtype=torch.float32),
-            torch.tensor(y, dtype=torch.float32),
+            torch.from_numpy(X),
+            torch.from_numpy(y),
         )
 
 
