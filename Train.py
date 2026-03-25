@@ -15,6 +15,9 @@ def mse(pred, target):
     diff2 = ((pred - target) ** 2).mean() 
     return diff2
 
+def mae(pred, target):
+    return torch.abs(pred - target).mean()
+
 def train_one_epoch(model, loader, optimizer, device):
     model.train()
     losses = []
@@ -23,7 +26,8 @@ def train_one_epoch(model, loader, optimizer, device):
         targets = targets.to(device)
 
         outputs = model(inputs)  # (B, T)
-        loss = mse(outputs, targets)
+        #loss = mse(outputs, targets)
+        loss = mae(outputs, targets)
 
         optimizer.zero_grad()
         loss.backward()
@@ -42,7 +46,8 @@ def validate(model, loader, device):
         targets = targets.to(device)
 
         outputs = model(inputs)
-        loss = mse(outputs, targets)
+        #loss = mse(outputs, targets)
+        loss = mae(outputs, targets)
         losses.append(loss.item())
     return float(np.mean(losses))
 
@@ -96,7 +101,7 @@ def main():
     patience_counter = 0
     start_time = time.time()
 
-    ckpt_root = getattr(args, "ckpt_dir", "checkpoints")
+    ckpt_root = getattr(args, "ckpt_dir", "checkpoints2")
     tag = getattr(args, "run_tag", "POWER")
 
     for epoch in range(args.epochs):

@@ -15,19 +15,19 @@ METADATA_CSV = Path("/mnt/weatherloss/WindPower/data/NorthSea/Power/windfarm_met
 OUT_BASE_DIR = Path("/mnt/weatherloss/WindPowerTransformer/data/FCS")
 
 MODELS = {
-    "GraphTransformer": "GraphTransformerNew",
-    "Transformer": "TransformerNew",
-    "GNN": "GNNNew",
+    "GraphTransformer": "GTCIFINAL",
+    "Transformer": "TFCIFINAL",
+    "GNN": "GNNCIFINAL",
 }
 
 # Variables we want in the output files
 VARS = [
     "ws10",
     "ws100",
-    "wdir10_sin",
+    "wdir100_cos",
+    "wdir100_sin",
     "wdir10_cos",
-    "wdir_sin100",
-    "wdir_cos100",
+    "wdir10_sin",
 ]
 
 FNAME_RE = re.compile(r"forecast_(\d{14})\.nc$")  # forecast_YYYYmmddHHMMSS.nc

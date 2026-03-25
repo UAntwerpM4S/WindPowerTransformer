@@ -50,7 +50,7 @@ class WindRampDataset(Dataset):
         obs_dir="/mnt/weatherloss/WindPowerTransformer/data/OBS",
         model_name="GraphTransformer",
         windpark="Belwind Phase 1",
-        features=("ws10", "ws100", "wdir10_sin", "wdir10_cos", "wdir_sin100", "wdir_cos100"),
+        features=("ws10", "ws100", "wdir10_sin", "wdir10_cos", "wdir100_sin", "wdir100_cos"),
         keep_hourly_only=True,  # keeps 0,3,6,... too since they are integers
     ):
         with open(date_file, "rb") as f:
