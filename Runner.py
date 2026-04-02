@@ -2,13 +2,13 @@ import os
 from pathlib import Path
 
 
-windparks = ['Belwind Phase 1']
-# , 'Thorntonbank - C-Power - Area NE',
-#        'Thorntonbank - C-Power - Area SW', 'Mermaid Offshore WP',
-#        'Nobelwind Offshore Windpark', 'Norther Offshore WP', 'Northwester 2',
-#        'Northwind', 'Rentel Offshore WP', 'Seastar Offshore WP']
+windparks = ['Belwind Phase 1'
+, 'Thorntonbank - C-Power - Area NE',
+       'Thorntonbank - C-Power - Area SW', 'Mermaid Offshore WP',
+       'Nobelwind Offshore Windpark', 'Norther Offshore WP', 'Northwester 2',
+       'Northwind', 'Rentel Offshore WP', 'Seastar Offshore WP']
 
-model_names = ["GraphTransformer"]#,"Transformer","GNN"]
+model_names = ["GraphTransformer","Transformer","GNN"]
 model_dim = 128
 n_heads = 4
 num_layers = 4 

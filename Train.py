@@ -101,7 +101,7 @@ def main():
     patience_counter = 0
     start_time = time.time()
 
-    ckpt_root = getattr(args, "ckpt_dir", "checkpoints2")
+    ckpt_root = getattr(args, "ckpt_dir", "checkpoints")
     tag = getattr(args, "run_tag", "POWER")
 
     for epoch in range(args.epochs):
