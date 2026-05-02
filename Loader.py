@@ -130,7 +130,7 @@ class WindRampDataset(Dataset):
 
 def loader_prepare(
     batch_size=16,
-    model_name="GraphTransformer",
+    model_name="VanillaPower",
     windpark="Belwind Phase 1",
     fcs_dir="/mnt/weatherloss/WindPowerTransformer/data/FCS",
     obs_dir="/mnt/weatherloss/WindPowerTransformer/data/OBS",

@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-FORECAST_DIR = Path("/mnt/weatherloss/WindPower/inference/CI/GraphTransformerNew")
+FORECAST_DIR = Path("/mnt/weatherloss/WindPower/inference/EGU/BigTransformerNew")
 POWER_DIR = Path("/mnt/weatherloss/WindPower/data/NorthSea/Power")
 METADATA_CSV = POWER_DIR / "windfarm_metadata.csv"
 OBS_CSV = POWER_DIR / "BE_UK_offshore_per_unit_3H_meanMW_shifted.csv"

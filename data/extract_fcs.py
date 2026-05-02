@@ -10,14 +10,14 @@ import pandas as pd
 import xarray as xr
 
 
-INFERENCE_BASE_DIR = Path("/mnt/weatherloss/WindPower/inference/CI")
+INFERENCE_BASE_DIR = Path("/mnt/weatherloss/WindPower/inference/EGU")
 METADATA_CSV = Path("/mnt/weatherloss/WindPower/data/NorthSea/Power/windfarm_metadata.csv")
 OUT_BASE_DIR = Path("/mnt/weatherloss/WindPowerTransformer/data/FCS")
 
 MODELS = {
-    "GraphTransformer": "GTCIFINAL",
-    "Transformer": "TFCIFINAL",
-    "GNN": "GNNCIFINAL",
+   # "NoPower": "NoPowerTFNew",
+     "VanillaPowerPP": "BigTransformerNew",
+    # "SyntheticPower": "SyntheticNew",
 }
 
 # Variables we want in the output files
@@ -28,6 +28,7 @@ VARS = [
     "wdir100_sin",
     "wdir10_cos",
     "wdir10_sin",
+    "power"
 ]
 
 FNAME_RE = re.compile(r"forecast_(\d{14})\.nc$")  # forecast_YYYYmmddHHMMSS.nc
@@ -38,7 +39,7 @@ FNAME_RE = re.compile(r"forecast_(\d{14})\.nc$")  # forecast_YYYYmmddHHMMSS.nc
 # Inclusive filtering by default.
 # ---------------------------
 START_DT = datetime.strptime("20240801000000", "%Y%m%d%H%M%S")
-END_DT   = datetime.strptime("20250728210000", "%Y%m%d%H%M%S")
+END_DT   = datetime.strptime("20250731210000", "%Y%m%d%H%M%S")
 
 
 def load_belgian_farms(path: Path) -> pd.DataFrame:

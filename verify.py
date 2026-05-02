@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 # ========= CONFIG =========
-MODEL_NAMES = ["GraphTransformer", "GNN", "Transformer"]
+MODEL_NAMES = ["VanillaPower", "SyntheticPower", "NoPower"]
 
 DIM = 128
 HEADS = 4
@@ -39,10 +39,9 @@ def _sum_over_windparks(files):
     return xr.align(f_sum, t_sum, join="inner")
 
 
-def _rmse_pct(f, t):
-    err = f - t
-    rmse = np.sqrt((err ** 2).mean(dim="date", skipna=True)).values
-    return (rmse / TOTAL_CAPACITY_MW) * 100.0
+def _mae_pct(f, t):
+    mae = np.abs(f - t).mean(dim="date", skipna=True).values
+    return (mae / TOTAL_CAPACITY_MW) * 100.0
 
 
 def main():
@@ -64,35 +63,35 @@ def main():
         lt_steps = tf_f["lead_time"].values
         lt_hours = lt_steps * 3
 
-        rmse_tf = _rmse_pct(tf_f, tf_t)
-        rmse_pc = _rmse_pct(pc_f, pc_t)
+        mae_tf = _mae_pct(tf_f, tf_t)
+        mae_pc = _mae_pct(pc_f, pc_t)
 
         # ---- plot ----
-        plt.plot(lt_hours, rmse_tf, linewidth=2, label=f"{model} (TEST_FCS)")
-        plt.plot(lt_hours, rmse_pc, linewidth=2, linestyle="--", label=f"{model} (PowerCurve)")
+        plt.plot(lt_hours, mae_tf, linewidth=2, label=f"{model} (TEST_FCS)")
+        plt.plot(lt_hours, mae_pc, linewidth=2, linestyle="--", label=f"{model} (PowerCurve)")
 
         # ---- CSV ----
         df = pd.DataFrame({
             "lead_time_hours": lt_hours,
-            "rmse_test_fcs_pct": rmse_tf,
-            "rmse_powercurve_pct": rmse_pc,
+            "mae_test_fcs_pct": mae_tf,
+            "mae_powercurve_pct": mae_pc,
         })
         csv_path = os.path.join(
             RESULTS_DIR,
-            f"RMSE_{model}_dim{DIM}_heads{HEADS}_layers{LAYERS}.csv",
+            f"MAE_{model}_dim{DIM}_heads{HEADS}_layers{LAYERS}.csv",
         )
         df.to_csv(csv_path, index=False)
 
-    plt.title("Aggregated Offshore RMSE vs Lead Time", fontsize=18)
+    plt.title("Aggregated Offshore MAE vs Lead Time", fontsize=18)
     plt.xlabel("Lead Time [h]", fontsize=16)
-    plt.ylabel("RMSE [% of capacity]", fontsize=16)
+    plt.ylabel("MAE [% of capacity]", fontsize=16)
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
 
     out_png = os.path.join(
         RESULTS_DIR,
-        f"Compare_RMSE_PCT_6lines_dim{DIM}_heads{HEADS}_layers{LAYERS}.png",
+        f"Compare_MAE_PCT_6lines_dim{DIM}_heads{HEADS}_layers{LAYERS}.png",
     )
     plt.savefig(out_png)
     plt.close()
