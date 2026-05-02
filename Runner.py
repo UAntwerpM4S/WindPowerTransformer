@@ -16,7 +16,7 @@ num_layers = 4
 base_command = (
     "python3 Train.py "
     "--model_name {model_name} "
-    "--input_dim 6 "
+    "--input_dim 7 "
     "--model_dim {model_dim} "
     "--n_heads {n_heads} "
     "--num_layers {num_layers} "

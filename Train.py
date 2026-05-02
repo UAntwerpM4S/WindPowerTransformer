@@ -73,7 +73,7 @@ def main():
         fcs_dir=fcs_dir,
         model_name=args.model_name,
         windpark=args.windpark,
-        ws_vars=("ws10", "ws100"),
+        ws_vars=("ws10", "ws100", "power"),
     )
 
     model = TemporalTransformer(

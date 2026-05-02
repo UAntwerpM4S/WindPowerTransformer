@@ -50,7 +50,7 @@ class WindRampDataset(Dataset):
         obs_dir="/mnt/weatherloss/WindPowerTransformer/data/OBS",
         model_name="GraphTransformer",
         windpark="Belwind Phase 1",
-        features=("ws10", "ws100", "wdir10_sin", "wdir10_cos", "wdir100_sin", "wdir100_cos"),
+        features=("ws10", "ws100", "wdir10_sin", "wdir10_cos", "wdir100_sin", "wdir100_cos", "power"),
         keep_hourly_only=True,  # keeps 0,3,6,... too since they are integers
     ):
         with open(date_file, "rb") as f:
@@ -105,7 +105,7 @@ class WindRampDataset(Dataset):
             for var in self.features:
                 arr = fcs[var].values.astype(np.float32).copy()  # (T,)
 
-                if var in ("ws10", "ws100"):
+                if var in ("ws10", "ws100", "power"):
                     mu = float(self.stats[var]["mean"])
                     sd = float(self.stats[var]["std"])
                     arr = (arr - mu) / max(sd, 1e-6)
