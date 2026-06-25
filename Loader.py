@@ -1,15 +1,16 @@
 """
 CERRA-backed dataset for the WindPowerTransformer.
 
-The continuous hourly CERRA reanalysis zarr is treated as a stream of
+The continuous CERRA reanalysis zarr (3-hourly) is treated as a stream of
 *pseudo-forecasts*: each CERRA timestamp is an "init", and the next
-`lead_hours` hourly steps form the lead-time axis. One sample is
+`lead_hours` worth of steps form the lead-time axis. One sample is
 
     X : (T, F)  float32   -- F weather inputs over the 36h window
     y : (T,)    float32   -- target power over the window
     m : (T,)    bool      -- finite-target mask (real obs can have gaps)
 
-with T = lead_hours + 1 (inclusive 0..36h).
+with T = lead_hours // freq_hours + 1 (e.g. 36h at 3-hourly -> 13 steps:
+0,3,6,...,36h).
 
 The zarr is the Anemoi format used by build_powercurve.py:
     data        (time, variable, ensemble, cell)
@@ -189,12 +190,17 @@ class CerraWindowDataset(Dataset):
         features=DEFAULT_FEATURES,
         target="power",
         lead_hours=36,
+        freq_hours=3,
         stride=1,
         ensemble=0,
     ):
+        if lead_hours % freq_hours != 0:
+            raise ValueError(f"lead_hours ({lead_hours}) must be divisible by freq_hours ({freq_hours})")
         self.features = list(features)
         self.target = target
-        self.T = int(lead_hours) + 1  # inclusive 0..lead_hours
+        self.lead_hours = int(lead_hours)
+        self.freq_hours = int(freq_hours)
+        self.n_steps = lead_hours // freq_hours + 1  # inclusive 0..lead_hours
 
         with _open_cerra(zarr_path) as ds:
             dates, var_names, series = _cerra_cell_series(
@@ -216,8 +222,8 @@ class CerraWindowDataset(Dataset):
                 sd = float(stats[v]["std"])
                 self.X_all[:, fpos] = (self.X_all[:, fpos] - mu) / max(sd, 1e-6)
 
-        # contiguity guard: a window is valid only if its T steps are
-        # consecutive hours (CERRA is regular hourly, but be safe at gaps).
+        # contiguity guard: a window is valid only if its n_steps span exactly
+        # lead_hours (CERRA is regular 3-hourly, but be safe at gaps).
         step = self.dates.values.astype("datetime64[h]")
         T_all = len(self.dates)
         t0 = pd.Timestamp(start, tz="UTC")
@@ -225,11 +231,11 @@ class CerraWindowDataset(Dataset):
         in_split = (self.dates >= t0) & (self.dates <= t1)
 
         starts = []
-        for i in range(0, T_all - self.T + 1, stride):
+        for i in range(0, T_all - self.n_steps + 1, stride):
             if not in_split[i]:
                 continue
-            span = (step[i + self.T - 1] - step[i]).astype("timedelta64[h]").astype(int)
-            if span == self.T - 1:  # exact hourly spacing across the window
+            span = (step[i + self.n_steps - 1] - step[i]).astype("timedelta64[h]").astype(int)
+            if span == self.lead_hours:  # exact regular spacing across the window
                 starts.append(i)
         self.starts = np.asarray(starts, dtype=np.int64)
         self.init_dates = self.dates[self.starts]
@@ -239,7 +245,7 @@ class CerraWindowDataset(Dataset):
 
     def __getitem__(self, idx):
         s = int(self.starts[idx])
-        e = s + self.T
+        e = s + self.n_steps
 
         X = self.X_all[s:e].copy()           # (T, F)
         y = self.y_all[s:e].copy()           # (T,)
@@ -270,6 +276,7 @@ def loader_prepare(
     features=DEFAULT_FEATURES,
     target="power",
     lead_hours=36,
+    freq_hours=3,
     stride=1,
     ensemble=0,
     num_workers_train=4,
@@ -287,7 +294,8 @@ def loader_prepare(
             zarr_path, metadata_path, windpark,
             start=rng[0], end=rng[1], stats=stats,
             features=features, target=target,
-            lead_hours=lead_hours, stride=stride, ensemble=ensemble,
+            lead_hours=lead_hours, freq_hours=freq_hours,
+            stride=stride, ensemble=ensemble,
         )
 
     train_set = make(train_range)

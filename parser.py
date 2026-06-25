@@ -38,9 +38,11 @@ def get_args():
     parser.add_argument("--target", type=str, default="power",
                         help="CERRA variable used as target (injected observed power)")
     parser.add_argument("--lead_hours", type=int, default=36,
-                        help="Pseudo-forecast horizon; window length is lead_hours+1 steps")
+                        help="Pseudo-forecast horizon in hours (window = lead_hours/freq_hours+1 steps)")
+    parser.add_argument("--freq_hours", type=int, default=3,
+                        help="Native CERRA step in hours (3-hourly)")
     parser.add_argument("--stride", type=int, default=1,
-                        help="Hours between consecutive pseudo-forecast inits")
+                        help="Steps between consecutive pseudo-forecast inits (1 = every 3h)")
     parser.add_argument("--ensemble", type=int, default=0,
                         help="Ensemble member index to read from the zarr")
 

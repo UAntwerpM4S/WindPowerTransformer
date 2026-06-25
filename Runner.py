@@ -35,6 +35,7 @@ base_command = (
     "--lr 0.001 "
     "--patience 5 "
     "--lead_hours 36 "
+    "--freq_hours 3 "
     "--stride 1 "
     "--zarr_path {zarr_path} "
     "--metadata_path {metadata_path} "

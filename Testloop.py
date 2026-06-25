@@ -28,6 +28,7 @@ N_HEADS = 4
 NUM_LAYERS = 4
 MLP_MULT = 4
 LEAD_HOURS = 36
+FREQ_HOURS = 3
 BATCH_SIZE = 8
 
 ZARR_PATH = "/mnt/weatherloss/WindPower/data/EGU26/Anemoidatasets/New_Cerra_A_large.zarr"
@@ -105,6 +106,7 @@ def main():
             test_range=TEST_RANGE,
             batch_size=BATCH_SIZE,
             lead_hours=LEAD_HOURS,
+            freq_hours=FREQ_HOURS,
             stride=1,
         )
 
@@ -121,7 +123,7 @@ def main():
 
         n = preds.shape[0]
         init_dates = test_set.init_dates[:n].tz_localize(None).values.astype("datetime64[ns]")
-        lead_time = np.arange(LEAD_HOURS + 1, dtype=np.int32)  # hours
+        lead_time = np.arange(0, LEAD_HOURS + 1, FREQ_HOURS, dtype=np.int32)  # hours: 0,3,...,36
 
         ds = xr.Dataset(
             {
