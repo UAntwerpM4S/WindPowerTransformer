@@ -8,7 +8,7 @@ from pathlib import Path
 from datetime import datetime
 from tqdm import tqdm
 
-MODEL_NAMES = ["VanillaPower", "NoPower", "Synthetic"]
+MODEL_NAMES = ["VanillaPowerPP"]
 
 FCS_BASE_DIR   = Path("data/FCS")
 OBS_DIR        = Path("data/OBS")

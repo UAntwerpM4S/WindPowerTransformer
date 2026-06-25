@@ -11,8 +11,8 @@ import re
 from Transformer import TemporalTransformer
 
 # ======== USER CONFIG ========
-MODEL_NAMES = ["VanillaPower","NoPower","SyntheticPower"]  # folders under checkpoints/
-INPUT_DIM   = 6
+MODEL_NAMES = ["VanillaPowerPP"]  # folders under checkpoints/
+INPUT_DIM   = 7
 MODEL_DIM   = 128
 N_HEADS     = 4
 NUM_LAYERS  = 4

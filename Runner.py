@@ -8,7 +8,7 @@ windparks = ['Belwind Phase 1'
        'Nobelwind Offshore Windpark', 'Norther Offshore WP', 'Northwester 2',
        'Northwind', 'Rentel Offshore WP', 'Seastar Offshore WP']
 
-model_names = ["NoPower"]
+model_names = ["VanillaPowerPP"]
 model_dim = 128
 n_heads = 4
 num_layers = 4 

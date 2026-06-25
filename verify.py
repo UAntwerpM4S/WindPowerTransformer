@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 # ========= CONFIG =========
-MODEL_NAMES = ["VanillaPower", "SyntheticPower", "NoPower"]
+MODEL_NAMES = ["VanillaPowerPP"]
 
 DIM = 128
 HEADS = 4
