@@ -1,22 +1,31 @@
 import os
-from pathlib import Path
 
+windparks = [
+    "Belwind Phase 1",
+    "Thorntonbank - C-Power - Area NE",
+    "Thorntonbank - C-Power - Area SW",
+    "Mermaid Offshore WP",
+    "Nobelwind Offshore Windpark",
+    "Norther Offshore WP",
+    "Northwester 2",
+    "Northwind",
+    "Rentel Offshore WP",
+    "Seastar Offshore WP",
+]
 
-windparks = ['Belwind Phase 1'
-, 'Thorntonbank - C-Power - Area NE',
-       'Thorntonbank - C-Power - Area SW', 'Mermaid Offshore WP',
-       'Nobelwind Offshore Windpark', 'Norther Offshore WP', 'Northwester 2',
-       'Northwind', 'Rentel Offshore WP', 'Seastar Offshore WP']
-
-model_names = ["VanillaPowerPP"]
+run_tag = "CERRA"
+input_dim = 6
 model_dim = 128
 n_heads = 4
-num_layers = 4 
+num_layers = 4
+
+ZARR_PATH = "/mnt/weatherloss/WindPower/data/EGU26/Anemoidatasets/New_Cerra_A_large.zarr"
+METADATA_PATH = "/mnt/weatherloss/WindPower/data/NorthSea/Power/windfarm_metadata.csv"
 
 base_command = (
     "python3 Train.py "
-    "--model_name {model_name} "
-    "--input_dim 7 "
+    "--run_tag {run_tag} "
+    "--input_dim {input_dim} "
     "--model_dim {model_dim} "
     "--n_heads {n_heads} "
     "--num_layers {num_layers} "
@@ -25,21 +34,23 @@ base_command = (
     "--epochs 25 "
     "--lr 0.001 "
     "--patience 5 "
-    "--windpark \"{windpark}\" "
-    "--fcs_dir {fcs_dir}" 
+    "--lead_hours 36 "
+    "--stride 1 "
+    "--zarr_path {zarr_path} "
+    "--metadata_path {metadata_path} "
+    '--windpark "{windpark}"'
 )
 
-FCS_BASE_DIR = Path("/mnt/weatherloss/WindPowerTransformer/data/FCS")
-
-for model_name in model_names:
-    fcs_dir = FCS_BASE_DIR/ model_name
-    for windpark in windparks:
-        cmd = base_command.format(
-                model_name=model_name,
-                model_dim=model_dim,
-                n_heads=n_heads,
-                num_layers=num_layers,
-                windpark=windpark,
-                fcs_dir = fcs_dir)
-        print(f"\n🚀 Running: {cmd}")
-        os.system(cmd)
+for windpark in windparks:
+    cmd = base_command.format(
+        run_tag=run_tag,
+        input_dim=input_dim,
+        model_dim=model_dim,
+        n_heads=n_heads,
+        num_layers=num_layers,
+        windpark=windpark,
+        zarr_path=ZARR_PATH,
+        metadata_path=METADATA_PATH,
+    )
+    print(f"\n🚀 Running: {cmd}")
+    os.system(cmd)

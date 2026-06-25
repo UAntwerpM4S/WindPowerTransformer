@@ -1,150 +1,139 @@
 #!/usr/bin/env python3
+"""
+Evaluate CERRA-trained transformers on the CERRA test split (2024-08..2025-07).
+
+For each windpark it loads the matching checkpoint, runs inference over the test
+windows, and saves a NetCDF with `forecast` and `truth` indexed by (init date,
+lead_time hours). This is the in-distribution CERRA test; the separate forecast
+test year (the six weather models) is evaluated by feeding their forecasts
+through the same checkpoints with the CERRA train stats.
+"""
 import os
-import pickle
+import re
+import glob
+
 import numpy as np
 import torch
 import xarray as xr
-from datetime import datetime 
 from tqdm import tqdm
-from Loader import loader_prepare
-import re 
+
 from Transformer import TemporalTransformer
+from Loader import loader_prepare
 
-# ======== USER CONFIG ========
-MODEL_NAMES = ["VanillaPowerPP"]  # folders under checkpoints/
-INPUT_DIM   = 7
-MODEL_DIM   = 128
-N_HEADS     = 4
-NUM_LAYERS  = 4
-MLP_MULT    = 4
-BATCH_SIZE  = 8
-OUT_DIR     = "TEST_FCS"
-# =============================
+# ======== CONFIG ========
+RUN_TAG = "CERRA"
+INPUT_DIM = 6
+MODEL_DIM = 128
+N_HEADS = 4
+NUM_LAYERS = 4
+MLP_MULT = 4
+LEAD_HOURS = 36
+BATCH_SIZE = 8
 
-os.makedirs(OUT_DIR, exist_ok=True)
+ZARR_PATH = "/mnt/weatherloss/WindPower/data/EGU26/Anemoidatasets/New_Cerra_A_large.zarr"
+METADATA_PATH = "/mnt/weatherloss/WindPower/data/NorthSea/Power/windfarm_metadata.csv"
+
+TRAIN_RANGE = ("2020-01-01", "2024-01-31 23:00")
+VAL_RANGE = ("2024-02-01", "2024-07-31 23:00")
+TEST_RANGE = ("2024-08-01", "2025-07-31 23:00")
+
+OUT_DIR = "TEST_CERRA"
+# ========================
+
+windparks = [
+    "Belwind Phase 1",
+    "Thorntonbank - C-Power - Area NE",
+    "Thorntonbank - C-Power - Area SW",
+    "Mermaid Offshore WP",
+    "Nobelwind Offshore Windpark",
+    "Norther Offshore WP",
+    "Northwester 2",
+    "Northwind",
+    "Rentel Offshore WP",
+    "Seastar Offshore WP",
+]
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+
 def safe_name(s: str) -> str:
-    # replace spaces and any weird characters with underscores
-    return re.sub(r"[^A-Za-z0-9._-]+", "_", s).strip("_")
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", str(s)).strip("_")
 
 
-def parse_windpark_from_ckpt(ckpt_name: str) -> str:
-    base = ckpt_name.replace(".pt", "")
-    parts = base.split("_")
-
-    # find token like "parkBelwind Phase 1" or "parkNobelwind Offshore Windpark"
-    park_idx = next((i for i, p in enumerate(parts) if p.startswith("park")), None)
-    if park_idx is None:
-        return "UNKNOWN"
-
-    # windpark starts after removing "park" prefix from that token
-    first = parts[park_idx][len("park"):]
-    windpark_parts = [first] if first else []
-
-    # subsequent tokens until we hit hyperparams
-    stop_prefixes = ("in", "dim", "heads", "layers", "mlp", "lr", "ep", "POWER")
-    for p in parts[park_idx + 1:]:
-        if p.startswith(stop_prefixes):
-            break
-        windpark_parts.append(p)
-
-    windpark = "_".join(windpark_parts).strip("_")
-    return windpark or "UNKNOWN"
+def find_ckpt(windpark: str) -> str | None:
+    pat = os.path.join(
+        "checkpoints", RUN_TAG,
+        f"{RUN_TAG}_dim{MODEL_DIM}_park{windpark}_in{INPUT_DIM}_"
+        f"heads{N_HEADS}_layers{NUM_LAYERS}_*.pt",
+    )
+    matches = sorted(glob.glob(pat))
+    return matches[0] if matches else None
 
 
 @torch.no_grad()
-def run_inference_to_arrays(model: torch.nn.Module, test_loader):
+def infer(model, loader):
     model.eval()
-    preds_list, truths_list = [], []
-    for X, y in tqdm(test_loader, desc="Inference", leave=False):
-        X = X.to(device)
-        preds = model(X)           # (B, T)
-        preds_list.append(preds.cpu().numpy())
-        truths_list.append(y.numpy())
-    if not preds_list:
+    preds, truths = [], []
+    for X, y, mask in tqdm(loader, desc="Inference", leave=False):
+        out = model(X.to(device)).cpu().numpy()
+        y = y.numpy().copy()
+        y[~mask.numpy()] = np.nan          # keep gaps as NaN for honest scoring
+        preds.append(out)
+        truths.append(y)
+    if not preds:
         return None, None
-    preds  = np.concatenate(preds_list, axis=0)   # (N, T)
-    truths = np.concatenate(truths_list, axis=0)  # (N, T)
-    return preds, truths
+    return np.concatenate(preds, 0), np.concatenate(truths, 0)
+
 
 def main():
-    with open("data/test_dates.pkl", "rb") as f:
-        all_test_dates = pickle.load(f)
+    os.makedirs(OUT_DIR, exist_ok=True)
 
-    for model_name in MODEL_NAMES:
-        ckpt_dir = os.path.join("checkpoints", model_name)
-        if not os.path.isdir(ckpt_dir):
-            print(f"⚠️ Missing checkpoint directory: {ckpt_dir}")
+    for windpark in windparks:
+        ckpt = find_ckpt(windpark)
+        if ckpt is None:
+            print(f"⚠️ No checkpoint for {windpark}, skipping.")
+            continue
+        print(f"\n🔍 {windpark} | {os.path.basename(ckpt)}")
+
+        _, _, test_loader, test_set = loader_prepare(
+            windpark=windpark,
+            zarr_path=ZARR_PATH,
+            metadata_path=METADATA_PATH,
+            run_tag=RUN_TAG,
+            train_range=TRAIN_RANGE,
+            val_range=VAL_RANGE,
+            test_range=TEST_RANGE,
+            batch_size=BATCH_SIZE,
+            lead_hours=LEAD_HOURS,
+            stride=1,
+        )
+
+        model = TemporalTransformer(
+            input_dim=INPUT_DIM, model_dim=MODEL_DIM,
+            n_heads=N_HEADS, num_layers=NUM_LAYERS, mlp_mult=MLP_MULT,
+        ).to(device)
+        model.load_state_dict(torch.load(ckpt, map_location=device, weights_only=True))
+
+        preds, truths = infer(model, test_loader)
+        if preds is None:
+            print(f"⚠️ No test windows for {windpark}.")
             continue
 
-        base_model = TemporalTransformer(
-            input_dim=INPUT_DIM,
-            model_dim=MODEL_DIM,
-            n_heads=N_HEADS,
-            num_layers=NUM_LAYERS,
-            mlp_mult=MLP_MULT,
-        ).to(device)
+        n = preds.shape[0]
+        init_dates = test_set.init_dates[:n].tz_localize(None).values.astype("datetime64[ns]")
+        lead_time = np.arange(LEAD_HOURS + 1, dtype=np.int32)  # hours
 
-        # Cache test loaders per windpark so we don't rebuild them repeatedly
-        loader_cache = {}
-
-        for ckpt_name in sorted(os.listdir(ckpt_dir)):
-            if not ckpt_name.endswith(".pt"):
-                continue
-            # Optional: enforce matching hyperparams in filename
-            if f"dim{MODEL_DIM}_" not in ckpt_name or f"heads{N_HEADS}_" not in ckpt_name or f"layers{NUM_LAYERS}_" not in ckpt_name:
-                # Skip checkpoints with different architecture
-                continue
-
-            ckpt_path = os.path.join(ckpt_dir, ckpt_name)
-            windpark = parse_windpark_from_ckpt(ckpt_name)
-            print(f"\n🔍 {model_name} | {ckpt_name} | windpark={windpark}")
-
-            # Load weights
-            model = base_model
-            state = torch.load(ckpt_path, map_location=device,weights_only=True)
-            model.load_state_dict(state)
-
-
-            # Build / get test loader for this (model, windpark)
-            cache_key = (model_name, windpark)
-            if cache_key not in loader_cache:
-                _, _, test_loader = loader_prepare(
-                    batch_size=BATCH_SIZE,
-                    model_name=model_name,
-                    windpark=windpark,
-                    fcs_dir= "/mnt/weatherloss/WindPowerTransformer/data/FCS/" + model_name
-                )
-
-            else:
-                test_loader = loader_cache[cache_key]
-
-            # Inference
-            preds, truths = run_inference_to_arrays(model, test_loader)
-
-            n_samples, T = preds.shape
-
-            date_strs = all_test_dates[:n_samples]
-            dates = np.array([np.datetime64(datetime.strptime(s, "%Y%m%d%H%M%S")) for s in date_strs], dtype="datetime64[ns]")
-
-            lead_time = np.arange(T, dtype=np.int32)  # step index (0..T-1)
-
-
-            # Save NetCDF
-            ds = xr.Dataset(
-                {
-                    "forecast": (("date", "lead_time"), preds.astype(np.float32)),
-                    "truth":    (("date", "lead_time"), truths.astype(np.float32)),
-                },
-                coords={"date": dates, "lead_time": lead_time},
-            )
-
-            out_name = f"{model_name}_dim{MODEL_DIM}_heads{N_HEADS}_layers{NUM_LAYERS}_{safe_name(windpark)}.nc"
-
-            out_nc = os.path.join(OUT_DIR, out_name)
-            ds.to_netcdf(out_nc)
+        ds = xr.Dataset(
+            {
+                "forecast": (("date", "lead_time"), preds.astype(np.float32)),
+                "truth": (("date", "lead_time"), truths.astype(np.float32)),
+            },
+            coords={"date": init_dates, "lead_time": lead_time},
+            attrs={"windpark": windpark, "run_tag": RUN_TAG, "lead_hours": LEAD_HOURS},
+        )
+        out_nc = os.path.join(OUT_DIR, f"{RUN_TAG}_{safe_name(windpark)}.nc")
+        ds.to_netcdf(out_nc)
+        print(f"💾 {out_nc}  ({n} windows)")
 
 
 if __name__ == "__main__":

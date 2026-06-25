@@ -1,15 +1,51 @@
+"""
+CERRA-backed dataset for the WindPowerTransformer.
+
+The continuous hourly CERRA reanalysis zarr is treated as a stream of
+*pseudo-forecasts*: each CERRA timestamp is an "init", and the next
+`lead_hours` hourly steps form the lead-time axis. One sample is
+
+    X : (T, F)  float32   -- F weather inputs over the 36h window
+    y : (T,)    float32   -- target power over the window
+    m : (T,)    bool      -- finite-target mask (real obs can have gaps)
+
+with T = lead_hours + 1 (inclusive 0..36h).
+
+The zarr is the Anemoi format used by build_powercurve.py:
+    data        (time, variable, ensemble, cell)
+    latitudes   (cell,)
+    longitudes  (cell,)
+    dates       (time,)
+    attrs["variables"] -> ordered list of variable names
+
+IMPORTANT: the zarr's `power` variable holds the injected real observations and
+is used as the training target. The six weather inputs are taken at the
+windpark's CERRA grid cell (same cell mapping as build_powercurve.py).
+"""
+
 import os
 import pickle
+
 import numpy as np
+import pandas as pd
 import xarray as xr
 import torch
 from torch.utils.data import Dataset, DataLoader
 
-from data.stats import stats_path
+
+DEFAULT_FEATURES = (
+    "ws10", "ws100",
+    "wdir10_sin", "wdir10_cos",
+    "wdir100_sin", "wdir100_cos",
+)
+STANDARDIZE_VARS = ("ws10", "ws100")  # sin/cos are already in [-1, 1]
 
 
+# --------------------------------------------------------------------------- #
+# helpers
+# --------------------------------------------------------------------------- #
 def _interp1d_nan_to_num(arr: np.ndarray) -> np.ndarray:
-    """Linear interpolate along time; nearest boundary fill; zeros if all NaN."""
+    """Linear-interpolate along time; nearest-boundary fill; zeros if all NaN."""
     x = np.arange(arr.shape[0])
     m = np.isfinite(arr)
     if not m.any():
@@ -21,149 +57,255 @@ def _interp1d_nan_to_num(arr: np.ndarray) -> np.ndarray:
 
 
 def _interp2d_time_lastdim(arr2d: np.ndarray) -> np.ndarray:
-    """Interpolate each feature series along time axis (T,F)."""
+    """Interpolate each feature series along the time axis (T, F)."""
     arr2d = np.asarray(arr2d, dtype=np.float32)
-    T, F = arr2d.shape
     out = np.empty_like(arr2d)
-    for f in range(F):
+    for f in range(arr2d.shape[1]):
         out[:, f] = _interp1d_nan_to_num(arr2d[:, f])
     return out
 
 
-class WindRampDataset(Dataset):
-    """
-    Expects files:
-      fcs.<init>.nc with dims (model, windpark, lead_time) and vars:
-        ws10, ws100, wdir10_sin, wdir10_cos, wdir_sin100, wdir_cos100
-      obs.<init>.nc with dims (windpark, lead_time) and var:
-        WP
+def windpark_cerra_index(metadata_path, cerra_lat, cerra_lon, windpark) -> int:
+    """Map a single windpark name to its flat CERRA cell index.
 
-    Returns:
-        X:    (T, F) float32 — inputs (imputed)
-        y:    (T,)    float32 — target WP
+    Mirrors build_windpark_cerra_indices() in build_powercurve.py.
     """
+    meta = pd.read_csv(metadata_path)
+    cerra_keys = {
+        (round(float(la), 6), round(float(lo), 6)): i
+        for i, (la, lo) in enumerate(zip(cerra_lat, cerra_lon))
+    }
+    for _, row in meta.iterrows():
+        if str(row["farm"]) != str(windpark):
+            continue
+        key = (round(float(row["cerra_grid_lat"]), 6), round(float(row["cerra_grid_lon"]), 6))
+        if key in cerra_keys:
+            return cerra_keys[key]
+        raise KeyError(
+            f"Windpark {windpark!r} found in metadata but its CERRA grid "
+            f"({key}) does not match any CERRA cell."
+        )
+    raise KeyError(f"Windpark {windpark!r} not found in {metadata_path}")
 
+
+def _open_cerra(zarr_path):
+    return xr.open_zarr(zarr_path, consolidated=False)
+
+
+def _cerra_cell_series(ds, metadata_path, windpark, ensemble):
+    """Return (dates_utc, var_names, series) for one windpark cell.
+
+    series : (T_all, V) float32 array of ALL zarr variables at that cell.
+    """
+    var_names = list(ds.attrs["variables"])
+    cerra_lat = ds["latitudes"].values
+    cerra_lon = ds["longitudes"].values
+    cell_idx = windpark_cerra_index(metadata_path, cerra_lat, cerra_lon, windpark)
+
+    # one read of every variable at this cell: dims -> (time, variable)
+    series = (
+        ds["data"]
+        .isel(ensemble=ensemble, cell=cell_idx)
+        .transpose("time", "variable")
+        .values.astype(np.float32)
+    )
+    dates = pd.to_datetime(ds["dates"].values)
+    if dates.tz is None:
+        dates = dates.tz_localize("UTC")
+    else:
+        dates = dates.tz_convert("UTC")
+    return dates, var_names, series
+
+
+def _col_indices(var_names, requested):
+    missing = [v for v in requested if v not in var_names]
+    if missing:
+        raise KeyError(
+            f"Variables {missing} not in CERRA zarr. Available: {var_names}"
+        )
+    return [var_names.index(v) for v in requested]
+
+
+# --------------------------------------------------------------------------- #
+# stats (train split only)
+# --------------------------------------------------------------------------- #
+def stats_path(run_tag, windpark) -> str:
+    return os.path.join("artifacts", run_tag, windpark, "cerra_feature_stats.pkl")
+
+
+def ensure_stats(
+    zarr_path,
+    metadata_path,
+    windpark,
+    train_start,
+    train_end,
+    run_tag,
+    ws_vars=STANDARDIZE_VARS,
+    ensemble=0,
+):
+    """Compute mean/std of `ws_vars` over the TRAIN date range only (per park)."""
+    path = stats_path(run_tag, windpark)
+    if os.path.exists(path):
+        with open(path, "rb") as f:
+            return pickle.load(f)
+
+    with _open_cerra(zarr_path) as ds:
+        dates, var_names, series = _cerra_cell_series(ds, metadata_path, windpark, ensemble)
+
+    t0 = pd.Timestamp(train_start, tz="UTC")
+    t1 = pd.Timestamp(train_end, tz="UTC")
+    in_train = (dates >= t0) & (dates <= t1)
+
+    idx = _col_indices(var_names, ws_vars)
+    stats = {}
+    for v, ci in zip(ws_vars, idx):
+        vals = series[in_train, ci]
+        vals = vals[np.isfinite(vals)]
+        if vals.size == 0:
+            raise RuntimeError(f"No finite {v} values for {windpark} in train range.")
+        mu = float(vals.mean())
+        sd = float(vals.std(ddof=0))
+        stats[v] = {"mean": mu, "std": sd if sd > 1e-6 else 1.0}
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        pickle.dump(stats, f)
+    print(f"Saved CERRA stats -> {path}: {stats}")
+    return stats
+
+
+# --------------------------------------------------------------------------- #
+# dataset
+# --------------------------------------------------------------------------- #
+class CerraWindowDataset(Dataset):
     def __init__(
         self,
-        date_file,
-        fcs_dir="/mnt/weatherloss/WindPowerTransformer/data/FCS",
-        obs_dir="/mnt/weatherloss/WindPowerTransformer/data/OBS",
-        model_name="GraphTransformer",
-        windpark="Belwind Phase 1",
-        features=("ws10", "ws100", "wdir10_sin", "wdir10_cos", "wdir100_sin", "wdir100_cos", "power"),
-        keep_hourly_only=True,  # keeps 0,3,6,... too since they are integers
+        zarr_path,
+        metadata_path,
+        windpark,
+        start,
+        end,
+        stats,
+        features=DEFAULT_FEATURES,
+        target="power",
+        lead_hours=36,
+        stride=1,
+        ensemble=0,
     ):
-        with open(date_file, "rb") as f:
-            all_dates = pickle.load(f)
-
-        self.fcs_dir = fcs_dir
-        self.obs_dir = obs_dir
-        self.model_name = model_name
-        self.windpark = windpark
         self.features = list(features)
-        self.keep_hourly_only = keep_hourly_only
+        self.target = target
+        self.T = int(lead_hours) + 1  # inclusive 0..lead_hours
 
-        # Filter out dates where files are missing
-        self.dates = [
-            d for d in all_dates
-            if os.path.exists(os.path.join(fcs_dir, f"fcs.{d}.nc"))
-            and os.path.exists(os.path.join(obs_dir, f"obs.{d}.nc"))
-        ]
-        if len(self.dates) < len(all_dates):
-            print(f"Warning: skipped {len(all_dates) - len(self.dates)} dates with missing files.")
-
-        # Load train-only stats for THIS (model, park)
-        p = stats_path(model_name, windpark)
-        if not os.path.exists(p):
-            raise FileNotFoundError(
-                f"Stats not found: {p}. Train.py should call stats.ensure_stats() before creating loaders."
+        with _open_cerra(zarr_path) as ds:
+            dates, var_names, series = _cerra_cell_series(
+                ds, metadata_path, windpark, ensemble
             )
-        with open(p, "rb") as fh:
-            self.stats = pickle.load(fh)
+
+        feat_idx = _col_indices(var_names, self.features)
+        tgt_idx = _col_indices(var_names, [target])[0]
+
+        self.X_all = series[:, feat_idx].astype(np.float32)        # (T_all, F)
+        self.y_all = series[:, tgt_idx].astype(np.float32)         # (T_all,)
+        self.dates = dates
+
+        # standardize ws10/ws100 in place using train stats
+        for v in STANDARDIZE_VARS:
+            if v in self.features:
+                fpos = self.features.index(v)
+                mu = float(stats[v]["mean"])
+                sd = float(stats[v]["std"])
+                self.X_all[:, fpos] = (self.X_all[:, fpos] - mu) / max(sd, 1e-6)
+
+        # contiguity guard: a window is valid only if its T steps are
+        # consecutive hours (CERRA is regular hourly, but be safe at gaps).
+        step = self.dates.values.astype("datetime64[h]")
+        T_all = len(self.dates)
+        t0 = pd.Timestamp(start, tz="UTC")
+        t1 = pd.Timestamp(end, tz="UTC")
+        in_split = (self.dates >= t0) & (self.dates <= t1)
+
+        starts = []
+        for i in range(0, T_all - self.T + 1, stride):
+            if not in_split[i]:
+                continue
+            span = (step[i + self.T - 1] - step[i]).astype("timedelta64[h]").astype(int)
+            if span == self.T - 1:  # exact hourly spacing across the window
+                starts.append(i)
+        self.starts = np.asarray(starts, dtype=np.int64)
+        self.init_dates = self.dates[self.starts]
 
     def __len__(self):
-        return len(self.dates)
+        return len(self.starts)
 
     def __getitem__(self, idx):
-        init_str = self.dates[idx]
+        s = int(self.starts[idx])
+        e = s + self.T
 
-        fcs_path = os.path.join(self.fcs_dir, f"fcs.{init_str}.nc")
-        obs_path = os.path.join(self.obs_dir, f"obs.{init_str}.nc")
+        X = self.X_all[s:e].copy()           # (T, F)
+        y = self.y_all[s:e].copy()           # (T,)
 
-        with xr.open_dataset(fcs_path) as fcs_ds, xr.open_dataset(obs_path) as obs_ds:
-            fcs = fcs_ds.sel(model=self.model_name, windpark=self.windpark).squeeze()
-            obs = obs_ds.sel(windpark=self.windpark).squeeze()
-
-            # Keep only integer-hour lead times (keeps 3-hourly too)
-            if self.keep_hourly_only:
-                hourly = (fcs["lead_time"] % 1.0 == 0)
-                fcs = fcs.sel(lead_time=hourly)
-                obs = obs.sel(lead_time=hourly)
-
-            # Build features (standardize ws10/ws100; sin/cos are already [-1, 1])
-            feat_list = []
-            for var in self.features:
-                arr = fcs[var].values.astype(np.float32).copy()  # (T,)
-
-                if var in ("ws10", "ws100", "power"):
-                    mu = float(self.stats[var]["mean"])
-                    sd = float(self.stats[var]["std"])
-                    arr = (arr - mu) / max(sd, 1e-6)
-
-                feat_list.append(arr)
-
-            X = np.stack(feat_list, axis=-1)  # (T, F)
-
-            y = obs["WP"].values.astype(np.float32).copy()  # (T,)
-
-        target_finite = np.isfinite(y)
-        inputs_finite = np.all(np.isfinite(X), axis=-1)
-
-        # Impute inputs so the model never sees NaNs/Infs
-        X = _interp2d_time_lastdim(X)
+        mask = np.isfinite(y)
+        X = _interp2d_time_lastdim(X)        # model never sees NaN inputs
+        y = np.where(mask, y, 0.0).astype(np.float32)
 
         return (
-            torch.tensor(X, dtype=torch.float32),
-            torch.tensor(y, dtype=torch.float32),
+            torch.from_numpy(X),
+            torch.from_numpy(y),
+            torch.from_numpy(mask),
         )
 
 
+# --------------------------------------------------------------------------- #
+# prepare
+# --------------------------------------------------------------------------- #
 def loader_prepare(
-    batch_size=16,
-    model_name="VanillaPower",
-    windpark="Belwind Phase 1",
-    fcs_dir="/mnt/weatherloss/WindPowerTransformer/data/FCS",
-    obs_dir="/mnt/weatherloss/WindPowerTransformer/data/OBS",
-    train_dates="data/train_dates.pkl",
-    val_dates="data/val_dates.pkl",
-    test_dates="data/test_dates.pkl",
+    windpark,
+    zarr_path,
+    metadata_path,
+    run_tag,
+    train_range,
+    val_range,
+    test_range,
+    batch_size=8,
+    features=DEFAULT_FEATURES,
+    target="power",
+    lead_hours=36,
+    stride=1,
+    ensemble=0,
     num_workers_train=4,
     num_workers_eval=2,
 ):
-    train_set = WindRampDataset(
-        train_dates,
-        fcs_dir=fcs_dir,
-        obs_dir=obs_dir,
-        model_name=model_name,
-        windpark=windpark,
-    )
-    val_set = WindRampDataset(
-        val_dates,
-        fcs_dir=fcs_dir,
-        obs_dir=obs_dir,
-        model_name=model_name,
-        windpark=windpark,
-    )
-    test_set = WindRampDataset(
-        test_dates,
-        fcs_dir=fcs_dir,
-        obs_dir=obs_dir,
-        model_name=model_name,
-        windpark=windpark,
+    """Build train/val/test loaders for one windpark from the CERRA zarr."""
+    stats = ensure_stats(
+        zarr_path, metadata_path, windpark,
+        train_start=train_range[0], train_end=train_range[1],
+        run_tag=run_tag, ensemble=ensemble,
     )
 
-    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=num_workers_train)
-    val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False, num_workers=num_workers_eval)
-    test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=num_workers_eval)
+    def make(rng):
+        return CerraWindowDataset(
+            zarr_path, metadata_path, windpark,
+            start=rng[0], end=rng[1], stats=stats,
+            features=features, target=target,
+            lead_hours=lead_hours, stride=stride, ensemble=ensemble,
+        )
 
-    return train_loader, val_loader, test_loader
+    train_set = make(train_range)
+    val_set = make(val_range)
+    test_set = make(test_range)
+
+    print(
+        f"[{windpark}] windows -> train={len(train_set)} "
+        f"val={len(val_set)} test={len(test_set)}"
+    )
+
+    train_loader = DataLoader(
+        train_set, batch_size=batch_size, shuffle=True, num_workers=num_workers_train
+    )
+    val_loader = DataLoader(
+        val_set, batch_size=batch_size, shuffle=False, num_workers=num_workers_eval
+    )
+    test_loader = DataLoader(
+        test_set, batch_size=batch_size, shuffle=False, num_workers=num_workers_eval
+    )
+    return train_loader, val_loader, test_loader, test_set
