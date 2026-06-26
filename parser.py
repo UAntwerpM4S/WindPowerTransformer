@@ -35,8 +35,11 @@ def get_args():
         default="/mnt/weatherloss/WindPower/data/NorthSea/Power/windfarm_metadata.csv",
         help="windfarm_metadata.csv with cerra_grid_lat/cerra_grid_lon per farm",
     )
-    parser.add_argument("--target", type=str, default="power",
-                        help="CERRA variable used as target (injected observed power)")
+    parser.add_argument(
+        "--obs_csv", type=str,
+        default="/mnt/weatherloss/WindPower/data/NorthSea/Power/BE_UK_offshore_per_unit_3H_meanMW_shifted.csv",
+        help="Per-farm observed power CSV (one column per farm) — the training target",
+    )
     parser.add_argument("--lead_hours", type=int, default=36,
                         help="Pseudo-forecast horizon in hours (window = lead_hours/freq_hours+1 steps)")
     parser.add_argument("--freq_hours", type=int, default=3,

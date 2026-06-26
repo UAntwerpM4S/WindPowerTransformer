@@ -68,7 +68,7 @@ def main():
         val_range=(args.val_start, args.val_end),
         test_range=(args.test_start, args.test_end),
         batch_size=args.batch_size,
-        target=args.target,
+        obs_csv=args.obs_csv,
         lead_hours=args.lead_hours,
         freq_hours=args.freq_hours,
         stride=args.stride,

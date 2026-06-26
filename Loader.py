@@ -41,6 +41,29 @@ DEFAULT_FEATURES = (
 )
 STANDARDIZE_VARS = ("ws10", "ws100")  # sin/cos are already in [-1, 1]
 
+# Per-farm observed power (the training target). One column per farm, UTC index.
+OBS_CSV = "/mnt/weatherloss/WindPower/data/NorthSea/Power/BE_UK_offshore_per_unit_3H_meanMW_shifted.csv"
+
+
+def load_obs_csv(path=OBS_CSV) -> pd.DataFrame:
+    """Per-farm observed power, indexed by UTC timestamp, columns = farm names."""
+    df = pd.read_csv(path)
+    if "time" not in df.columns:
+        raise ValueError(f"Observation CSV must contain a 'time' column: {path}")
+    df["time"] = pd.to_datetime(df["time"], utc=True)
+    df = df.set_index("time").sort_index()
+    for c in df.columns:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
+
+
+def farm_obs_aligned(obs_df: pd.DataFrame, farm: str, dates_utc) -> np.ndarray:
+    """Per-farm obs aligned to dates_utc (tz-aware UTC); NaN where missing."""
+    if farm not in obs_df.columns:
+        print(f"⚠️ farm {farm!r} not in obs CSV columns — target will be all-NaN.")
+        return np.full(len(dates_utc), np.nan, dtype=np.float32)
+    return obs_df[farm].reindex(dates_utc).to_numpy(dtype=np.float32)
+
 
 # --------------------------------------------------------------------------- #
 # helpers
@@ -187,8 +210,8 @@ class CerraWindowDataset(Dataset):
         start,
         end,
         stats,
+        obs_df,
         features=DEFAULT_FEATURES,
-        target="power",
         lead_hours=36,
         freq_hours=3,
         stride=1,
@@ -197,7 +220,6 @@ class CerraWindowDataset(Dataset):
         if lead_hours % freq_hours != 0:
             raise ValueError(f"lead_hours ({lead_hours}) must be divisible by freq_hours ({freq_hours})")
         self.features = list(features)
-        self.target = target
         self.lead_hours = int(lead_hours)
         self.freq_hours = int(freq_hours)
         self.n_steps = lead_hours // freq_hours + 1  # inclusive 0..lead_hours
@@ -208,10 +230,10 @@ class CerraWindowDataset(Dataset):
             )
 
         feat_idx = _col_indices(var_names, self.features)
-        tgt_idx = _col_indices(var_names, [target])[0]
 
         self.X_all = series[:, feat_idx].astype(np.float32)        # (T_all, F)
-        self.y_all = series[:, tgt_idx].astype(np.float32)         # (T_all,)
+        # target = per-farm observed power (real obs, NaN where missing)
+        self.y_all = farm_obs_aligned(obs_df, windpark, dates)     # (T_all,)
         self.dates = dates
 
         # standardize ws10/ws100 in place using train stats
@@ -274,7 +296,7 @@ def loader_prepare(
     test_range,
     batch_size=8,
     features=DEFAULT_FEATURES,
-    target="power",
+    obs_csv=OBS_CSV,
     lead_hours=36,
     freq_hours=3,
     stride=1,
@@ -282,18 +304,23 @@ def loader_prepare(
     num_workers_train=4,
     num_workers_eval=2,
 ):
-    """Build train/val/test loaders for one windpark from the CERRA zarr."""
+    """Build train/val/test loaders for one windpark from the CERRA zarr.
+
+    Inputs come from the CERRA zarr; the target is per-farm observed power
+    from the obs CSV.
+    """
     stats = ensure_stats(
         zarr_path, metadata_path, windpark,
         train_start=train_range[0], train_end=train_range[1],
         run_tag=run_tag, ensemble=ensemble,
     )
+    obs_df = load_obs_csv(obs_csv)
 
     def make(rng):
         return CerraWindowDataset(
             zarr_path, metadata_path, windpark,
-            start=rng[0], end=rng[1], stats=stats,
-            features=features, target=target,
+            start=rng[0], end=rng[1], stats=stats, obs_df=obs_df,
+            features=features,
             lead_hours=lead_hours, freq_hours=freq_hours,
             stride=stride, ensemble=ensemble,
         )

@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 """
-Test CERRA-trained transformers on ONE weather model's real forecasts.
+Test CERRA-trained transformers on the real forecasts of one or more weather
+models.
+
+The transformer checkpoints are trained on CERRA and are model-independent, so
+they (and the CERRA observed-power truth) are loaded ONCE and reused across every
+weather model in MODELS.
 
 Each forecast_<init>.nc is already one 13-step pseudo-forecast:
-    dims (time=13, values=<cells>), with time = init, init+3h, ..., init+36h
+    dims (time=13, values=<cells>), time = init, init+3h, ..., init+36h
     data_vars include the 6 inputs by name + per-cell latitude/longitude.
 
-Per windpark:
+Per model, per windpark:
   - map the park to its nearest forecast-grid cell,
-  - pull the 6 weather inputs over the 13 steps -> X=(13,6),
+  - pull the 6 inputs over the 13 steps -> X=(13,6),
   - standardize ws10/ws100 with the CERRA TRAIN stats (artifacts/CERRA/<park>),
   - predict power with checkpoints/CERRA/...<park>...pt,
   - score against observed `power` from the CERRA zarr at the valid times.
 
-Output: TEST_FCS_<MODEL>/<park>.nc with forecast/truth over (init, lead_time),
-same format as TEST_CERRA so the two are directly comparable.
+Output: TEST_FCS/<MODEL>_dim{D}_heads{H}_layers{L}_<park>.nc  (verify.py format).
 """
 import os
 import re
@@ -31,11 +35,18 @@ from tqdm import tqdm
 from Transformer import TemporalTransformer
 from Loader import (
     DEFAULT_FEATURES, STANDARDIZE_VARS, stats_path,
-    _open_cerra, _cerra_cell_series, _interp2d_time_lastdim,
+    _interp2d_time_lastdim, load_obs_csv,
 )
 
 # ======== CONFIG ========
-MODEL = "VanillaPowerGT"          # the weather model whose forecasts we test
+MODELS = [
+    "RegularWeather",
+    "VanillaPowerGT",
+    "VanillaPowerTF",
+    "WindHeavyTinyPower",
+    "WindHeavyVanillaPower",
+    "WindWeather",
+]
 RUN_TAG = "CERRA"                 # checkpoint / stats tag from training
 INPUT_DIM = 6
 MODEL_DIM = 128
@@ -95,9 +106,9 @@ def load_stats(windpark: str) -> dict:
         return pickle.load(f)
 
 
-def list_forecasts():
+def list_forecasts(model: str):
     files = []
-    for f in glob.glob(os.path.join(FCS_BASE, MODEL, "forecast_*.nc")):
+    for f in glob.glob(os.path.join(FCS_BASE, model, "forecast_*.nc")):
         m = TS_RE.search(os.path.basename(f))
         if not m:
             continue
@@ -138,76 +149,77 @@ def predict(model, X):
     return np.concatenate(out, 0) if out else np.zeros((0, X.shape[1]), np.float32)
 
 
-def main():
-    os.makedirs(OUT_DIR, exist_ok=True)
+def build_obs_series():
+    """Per-farm observed power (truth) from the obs CSV. Model-independent."""
+    obs_df = load_obs_csv()
+    obs = {}
+    for wp in windparks:
+        if wp in obs_df.columns:
+            s = obs_df[wp]
+            obs[wp] = pd.Series(s.to_numpy(), index=s.index.tz_localize(None))
+        else:
+            print(f"⚠️ farm {wp!r} not in obs CSV — truth will be all-NaN.")
+            obs[wp] = pd.Series(dtype="float64")
+    return obs
 
-    files = list_forecasts()
+
+def load_park_models():
+    """Load each park's checkpoint + stats once (shared across all weather models)."""
+    state = {}
+    for wp in windparks:
+        ckpt = find_ckpt(wp)
+        if ckpt is None:
+            print(f"⚠️ No checkpoint for {wp}, it will be skipped.")
+            continue
+        model = TemporalTransformer(
+            input_dim=INPUT_DIM, model_dim=MODEL_DIM,
+            n_heads=N_HEADS, num_layers=NUM_LAYERS, mlp_mult=MLP_MULT,
+        ).to(device)
+        model.load_state_dict(torch.load(ckpt, map_location=device, weights_only=True))
+        state[wp] = {"model": model, "stats": load_stats(wp)}
+    return state
+
+
+def run_model(model_name, park_state, obs_series, meta):
+    files = list_forecasts(model_name)
     if not files:
-        raise SystemExit(f"No forecast files for {MODEL} in {TEST_START}..{TEST_END}")
-    print(f"{MODEL}: {len(files)} forecast inits in test range")
+        print(f"⚠️ No forecast files for {model_name} in test range, skipping.")
+        return
+    print(f"\n=== {model_name}: {len(files)} forecast inits ===")
 
-    # forecast-grid cell per park (from the first file's lat/lon + metadata)
-    meta = pd.read_csv(METADATA_PATH).set_index("farm")
     with xr.open_dataset(files[0]) as ds0:
         flat = ds0["latitude"].values
         flon = ds0["longitude"].values
         n_steps = ds0.sizes["time"]
     lead_time = np.arange(n_steps, dtype=np.int32)  # step index; verify.py *3 -> hours
 
-    print("park -> nearest forecast cell:")
-    park_cell = {}
-    for wp in windparks:
-        idx, dist = nearest_cell(
-            flat, flon,
-            float(meta.loc[wp, "cerra_grid_lat"]),
-            float(meta.loc[wp, "cerra_grid_lon"]),
-        )
+    park_cell, max_dist = {}, 0.0
+    for wp in park_state:
+        idx, dist = nearest_cell(flat, flon,
+                                 float(meta.loc[wp, "cerra_grid_lat"]),
+                                 float(meta.loc[wp, "cerra_grid_lon"]))
         park_cell[wp] = idx
-        print(f"  {wp:<34} cell={idx:>6}  dist={dist:.6f}° (~{dist * 111:.2f} km)")
+        max_dist = max(max_dist, dist)
+    print(f"  mapped {len(park_cell)} parks to forecast cells (max dist {max_dist:.6f}°)")
 
-    # observed power series per park (truth) from the CERRA zarr
-    obs_series = {}
-    with _open_cerra(ZARR_PATH) as dsz:
-        var_names = list(dsz.attrs["variables"])
-        pidx = var_names.index("power")
-        for wp in windparks:
-            dates, _, series = _cerra_cell_series(dsz, METADATA_PATH, wp, ensemble=0)
-            obs_series[wp] = pd.Series(series[:, pidx], index=dates.tz_localize(None))
-
-    # accumulate inputs/truth per park over all forecast files (single I/O pass)
-    acc = {wp: {"X": [], "truth": [], "init": []} for wp in windparks}
-    for fp in tqdm(files, desc="reading forecasts"):
+    acc = {wp: {"X": [], "truth": [], "init": []} for wp in park_state}
+    for fp in tqdm(files, desc=f"reading {model_name}"):
         with xr.open_dataset(fp) as ds:
             arrs = {v: ds[v].values for v in FEATURES}      # each (T, cells)
-            tidx = pd.DatetimeIndex(ds["time"].values)      # (T,) naive
-        for wp in windparks:
+            tidx = pd.DatetimeIndex(ds["time"].values)
+        for wp in park_state:
             c = park_cell[wp]
-            X = np.stack([arrs[v][:, c] for v in FEATURES], axis=-1)  # (T, F)
-            y = obs_series[wp].reindex(tidx).to_numpy(dtype=np.float32)  # (T,)
+            X = np.stack([arrs[v][:, c] for v in FEATURES], axis=-1)
+            y = obs_series[wp].reindex(tidx).to_numpy(dtype=np.float32)
             acc[wp]["X"].append(X.astype(np.float32))
             acc[wp]["truth"].append(y)
             acc[wp]["init"].append(tidx[0])
 
-    # per-park: standardize, predict, save
-    for wp in windparks:
-        ckpt = find_ckpt(wp)
-        if ckpt is None:
-            print(f"⚠️ No checkpoint for {wp}, skipping.")
-            continue
-
-        X = np.stack(acc[wp]["X"])                    # (N, T, F)
-        truth = np.stack(acc[wp]["truth"])            # (N, T)
+    for wp in park_state:
+        X = standardize_and_impute(np.stack(acc[wp]["X"]), park_state[wp]["stats"])
+        truth = np.stack(acc[wp]["truth"])
         init_dates = np.array(acc[wp]["init"], dtype="datetime64[ns]")
-
-        X = standardize_and_impute(X, load_stats(wp))
-
-        model = TemporalTransformer(
-            input_dim=INPUT_DIM, model_dim=MODEL_DIM,
-            n_heads=N_HEADS, num_layers=NUM_LAYERS, mlp_mult=MLP_MULT,
-        ).to(device)
-        model.load_state_dict(torch.load(ckpt, map_location=device, weights_only=True))
-
-        preds = predict(model, X)                     # (N, T)
+        preds = predict(park_state[wp]["model"], X)
 
         out = xr.Dataset(
             {
@@ -215,14 +227,27 @@ def main():
                 "truth": (("date", "lead_time"), truth.astype(np.float32)),
             },
             coords={"date": init_dates, "lead_time": lead_time},
-            attrs={"windpark": wp, "weather_model": MODEL, "run_tag": RUN_TAG},
+            attrs={"windpark": wp, "weather_model": model_name, "run_tag": RUN_TAG},
         )
         out_nc = os.path.join(
             OUT_DIR,
-            f"{MODEL}_dim{MODEL_DIM}_heads{N_HEADS}_layers{NUM_LAYERS}_{safe_name(wp)}.nc",
+            f"{model_name}_dim{MODEL_DIM}_heads{N_HEADS}_layers{NUM_LAYERS}_{safe_name(wp)}.nc",
         )
         out.to_netcdf(out_nc)
-        print(f"💾 {out_nc}  ({len(init_dates)} inits)")
+    print(f"  💾 wrote {len(park_state)} parks -> {OUT_DIR}/{model_name}_*.nc")
+
+
+def main():
+    os.makedirs(OUT_DIR, exist_ok=True)
+    meta = pd.read_csv(METADATA_PATH).set_index("farm")
+
+    park_state = load_park_models()
+    if not park_state:
+        raise SystemExit("No checkpoints found under checkpoints/CERRA — train first.")
+    obs_series = build_obs_series()
+
+    for model_name in MODELS:
+        run_model(model_name, park_state, obs_series, meta)
 
 
 if __name__ == "__main__":

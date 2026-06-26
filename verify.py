@@ -7,7 +7,14 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 # ========= CONFIG =========
-MODEL_NAMES = ["RegularWeather"]
+MODEL_NAMES = [
+    "RegularWeather",
+    "VanillaPowerGT",
+    "VanillaPowerTF",
+    "WindHeavyTinyPower",
+    "WindHeavyVanillaPower",
+    "WindWeather",
+]
 
 DIM = 128
 HEADS = 4
@@ -23,8 +30,9 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 
 
 def _sum_over_windparks(files):
+    """Fleet total = straight sum over per-farm files (targets are per-farm)."""
     f_sum = t_sum = None
-    for fp in files:
+    for fp in sorted(files):
         ds = xr.open_dataset(fp)
         f = ds["forecast"].astype(float)
         t = ds["truth"].astype(float)
@@ -33,8 +41,8 @@ def _sum_over_windparks(files):
         else:
             f, f_sum = xr.align(f, f_sum, join="inner")
             t, t_sum = xr.align(t, t_sum, join="inner")
-            f_sum += f
-            t_sum += t
+            f_sum = f_sum + f
+            t_sum = t_sum + t
         ds.close()
     return xr.align(f_sum, t_sum, join="inner")
 
@@ -59,8 +67,8 @@ def main():
             print(f"⚠️ No TEST_FCS files for {model}, skipping.")
             continue
 
+        # transformer: per-farm forecast + per-farm obs truth, summed over farms
         tf_f, tf_t = _sum_over_windparks(tf_files)
-        tf_f, tf_t = xr.align(tf_f, tf_t, join="inner")
 
         lt_hours = tf_f["lead_time"].values * 3
         mae_tf = _mae_pct(tf_f, tf_t)
@@ -68,17 +76,12 @@ def main():
 
         cols = {"lead_time_hours": lt_hours, "mae_test_fcs_pct": mae_tf}
 
-        # PowerCurve baseline is optional
+        # PowerCurve baseline is optional: per-farm power curve, summed over farms
         if pc_files:
             pc_f, pc_t = _sum_over_windparks(pc_files)
-            tf_f, tf_t, pc_f, pc_t = xr.align(tf_f, tf_t, pc_f, pc_t, join="inner")
-            lt_hours = tf_f["lead_time"].values * 3
-            mae_tf = _mae_pct(tf_f, tf_t)
             mae_pc = _mae_pct(pc_f, pc_t)
             plt.plot(lt_hours, mae_pc, linewidth=2, linestyle="--", label=f"{model} (PowerCurve)")
-            cols = {"lead_time_hours": lt_hours,
-                    "mae_test_fcs_pct": mae_tf,
-                    "mae_powercurve_pct": mae_pc}
+            cols["mae_powercurve_pct"] = mae_pc
         else:
             print(f"ℹ️ No PowerCurve baseline for {model}; plotting transformer only.")
 

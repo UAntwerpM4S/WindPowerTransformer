@@ -22,10 +22,17 @@ import pandas as pd
 import xarray as xr
 from tqdm import tqdm
 
-from Loader import _open_cerra, _cerra_cell_series
+from Loader import load_obs_csv
 
 # ======== CONFIG ========
-MODEL = "RegularWeather"          # must match the MODEL tested in Testloop.py
+MODELS = [                        # must match the MODELS tested in Testloop.py
+    "RegularWeather",
+    "VanillaPowerGT",
+    "VanillaPowerTF",
+    "WindHeavyTinyPower",
+    "WindHeavyVanillaPower",
+    "WindWeather",
+]
 
 FCS_BASE = "/mnt/weatherloss/WindPower/inference/WindAI"
 ZARR_PATH = "/mnt/weatherloss/WindPower/data/WindAI/Anemoidatasets/New_Cerra_A_large.zarr"
@@ -97,9 +104,9 @@ def load_counts(path: Path) -> pd.DataFrame:
     return df[cols].astype(float)
 
 
-def list_forecasts():
+def list_forecasts(model):
     files = []
-    for f in glob.glob(os.path.join(FCS_BASE, MODEL, "forecast_*.nc")):
+    for f in glob.glob(os.path.join(FCS_BASE, model, "forecast_*.nc")):
         m = TS_RE.search(os.path.basename(f))
         if not m:
             continue
@@ -113,22 +120,30 @@ def nearest_cell(lats, lons, lat0, lon0) -> int:
     return int(np.argmin((lats - lat0) ** 2 + (lons - lon0) ** 2))
 
 
-def main():
-    out_dir = OUT_DIR / MODEL
+def build_obs_series():
+    """Per-farm observed power (truth) from the obs CSV. Model-independent."""
+    obs_df = load_obs_csv()
+    obs = {}
+    for wp in windparks:
+        if wp in obs_df.columns:
+            s = obs_df[wp]
+            obs[wp] = pd.Series(s.to_numpy(), index=s.index.tz_localize(None))
+        else:
+            print(f"⚠️ farm {wp!r} not in obs CSV — truth will be all-NaN.")
+            obs[wp] = pd.Series(dtype="float64")
+    return obs
+
+
+def run_model(model, specs, counts, turbine_types, obs_series, meta):
+    files = list_forecasts(model)
+    if not files:
+        print(f"⚠️ No forecast files for {model} in test range, skipping.")
+        return
+    print(f"\n=== {model}: {len(files)} forecast inits ===")
+
+    out_dir = OUT_DIR / model
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    specs = load_specs(SPECS_PATH)
-    counts_df = load_counts(COUNTS_PATH)
-    turbine_types = list(counts_df.columns)
-    counts = counts_df.reindex(windparks).fillna(0.0)  # (parks x types)
-
-    files = list_forecasts()
-    if not files:
-        raise SystemExit(f"No forecast files for {MODEL} in {TEST_START}..{TEST_END}")
-    print(f"{MODEL}: {len(files)} forecast inits in test range")
-
-    # forecast-grid cell per park (grid matches CERRA, so this is exact)
-    meta = pd.read_csv(METADATA_PATH).set_index("farm")
     with xr.open_dataset(files[0]) as ds0:
         flat = ds0["latitude"].values
         flon = ds0["longitude"].values
@@ -141,16 +156,8 @@ def main():
     }
     lead_time = np.arange(n_steps, dtype=np.int32)  # step index; verify.py *3 -> hours
 
-    # observed power (truth) per park from the CERRA zarr
-    obs_series = {}
-    with _open_cerra(ZARR_PATH) as dsz:
-        pidx = list(dsz.attrs["variables"]).index("power")
-        for wp in windparks:
-            dates, _, series = _cerra_cell_series(dsz, str(METADATA_PATH), wp, ensemble=0)
-            obs_series[wp] = pd.Series(series[:, pidx], index=dates.tz_localize(None))
-
     acc = {wp: {"fc": [], "truth": [], "init": []} for wp in windparks}
-    for fp in tqdm(files, desc="power curve"):
+    for fp in tqdm(files, desc=f"power curve {model}"):
         with xr.open_dataset(fp) as ds:
             ws = ds[WS_VAR].values                      # (T, cells)
             tidx = pd.DatetimeIndex(ds["time"].values)  # (T,) naive
@@ -177,11 +184,23 @@ def main():
                 "truth": (("date", "lead_time"), truth.astype(np.float32)),
             },
             coords={"date": init_dates, "lead_time": lead_time},
-            attrs={"windpark": wp, "weather_model": MODEL, "ws_variable": WS_VAR},
+            attrs={"windpark": wp, "weather_model": model, "ws_variable": WS_VAR},
         )
-        out_nc = out_dir / f"{MODEL}_PowerCurve_{safe_name(wp)}.nc"
-        ds_out.to_netcdf(out_nc)
-        print(f"💾 {out_nc}  ({len(init_dates)} inits)")
+        ds_out.to_netcdf(out_dir / f"{model}_PowerCurve_{safe_name(wp)}.nc")
+    print(f"  💾 wrote {len(windparks)} parks -> {out_dir}/{model}_PowerCurve_*.nc")
+
+
+def main():
+    specs = load_specs(SPECS_PATH)
+    counts_df = load_counts(COUNTS_PATH)
+    turbine_types = list(counts_df.columns)
+    counts = counts_df.reindex(windparks).fillna(0.0)  # (parks x types)
+
+    meta = pd.read_csv(METADATA_PATH).set_index("farm")
+    obs_series = build_obs_series()
+
+    for model in MODELS:
+        run_model(model, specs, counts, turbine_types, obs_series, meta)
 
 
 if __name__ == "__main__":
