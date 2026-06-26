@@ -1,42 +1,65 @@
 #!/usr/bin/env python3
+"""
+PowerCurve baseline for ONE weather model, on the same test set as Testloop.py.
+
+For each forecast_<init>.nc (a 13-step window) we take ws100 at each windpark's
+forecast-grid cell, push it through an analytic turbine power curve weighted by
+that farm's turbine counts, and sum to a farm-total power forecast. Truth is the
+observed `power` from the CERRA zarr at the valid times (identical to Testloop).
+
+Output: PC_FCS/<MODEL>/<MODEL>_PowerCurve_<park>.nc with forecast/truth over
+(date, lead_time = step index 0..12), so verify.py can plot it against the
+transformer (TEST_FCS/...) on the same axes.
+"""
+import os
 import re
-import pickle
+import glob
+from datetime import datetime
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import xarray as xr
-from pathlib import Path
-from datetime import datetime
 from tqdm import tqdm
 
-MODEL_NAMES = ["VanillaPowerPP"]
+from Loader import _open_cerra, _cerra_cell_series
 
-FCS_BASE_DIR   = Path("data/FCS")
-OBS_DIR        = Path("data/OBS")
-TEST_DATES_PKL = Path("data/test_dates.pkl")
+# ======== CONFIG ========
+MODEL = "RegularWeather"          # must match the MODEL tested in Testloop.py
+
+FCS_BASE = "/mnt/weatherloss/WindPower/inference/WindAI"
+ZARR_PATH = "/mnt/weatherloss/WindPower/data/WindAI/Anemoidatasets/New_Cerra_A_large.zarr"
 
 POWER_META_DIR = Path("/mnt/weatherloss/WindPower/data/NorthSea/Power")
-COUNTS_PATH    = POWER_META_DIR / "wind_farm_turbine_counts.csv"
-SPECS_PATH     = POWER_META_DIR / "turbine_specs.csv"
-METADATA_PATH  = POWER_META_DIR / "windfarm_metadata.csv"
+COUNTS_PATH = POWER_META_DIR / "wind_farm_turbine_counts.csv"
+SPECS_PATH = POWER_META_DIR / "turbine_specs.csv"
+METADATA_PATH = POWER_META_DIR / "windfarm_metadata.csv"
 
-CERRA_PATH = Path("/mnt/weatherloss/WindPower/data/EGU26/Anemoidatasets/New_Cerra_A_large.zarr")
+TEST_START = "2024-08-01"
+TEST_END = "2025-07-31 23:00"
 
+WS_VAR = "ws100"
 OUT_DIR = Path("PC_FCS")
+# ========================
 
-WS_VAR  = "ws100"
-OBS_VAR = "WP"
+TS_RE = re.compile(r"forecast_(\d{14})\.nc$")
+
+windparks = [
+    "Belwind Phase 1",
+    "Thorntonbank - C-Power - Area NE",
+    "Thorntonbank - C-Power - Area SW",
+    "Mermaid Offshore WP",
+    "Nobelwind Offshore Windpark",
+    "Norther Offshore WP",
+    "Northwester 2",
+    "Northwind",
+    "Rentel Offshore WP",
+    "Seastar Offshore WP",
+]
 
 
 def safe_name(s: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", str(s)).strip("_")
-
-
-def ts14_to_datetime64(ts: str) -> np.datetime64:
-    return np.datetime64(datetime.strptime(ts, "%Y%m%d%H%M%S"), "ns")
-
-
-def ts14_to_utc(ts: str) -> pd.Timestamp:
-    return pd.Timestamp(datetime.strptime(ts, "%Y%m%d%H%M%S")).tz_localize("UTC")
 
 
 class TurbineSpec:
@@ -59,7 +82,7 @@ def power_curve(ws: np.ndarray, spec: TurbineSpec) -> np.ndarray:
     return out
 
 
-def load_specs(path: Path) -> dict[str, TurbineSpec]:
+def load_specs(path: Path) -> dict:
     df = pd.read_csv(path)
     key = "turbine_type (name-capacity-type)"
     return {
@@ -74,145 +97,91 @@ def load_counts(path: Path) -> pd.DataFrame:
     return df[cols].astype(float)
 
 
-def select_model_if_present(da: xr.DataArray, model_name: str) -> xr.DataArray:
-    return da.sel(model=model_name) if "model" in da.dims else da
+def list_forecasts():
+    files = []
+    for f in glob.glob(os.path.join(FCS_BASE, MODEL, "forecast_*.nc")):
+        m = TS_RE.search(os.path.basename(f))
+        if not m:
+            continue
+        init = datetime.strptime(m.group(1), "%Y%m%d%H%M%S")
+        if pd.Timestamp(TEST_START) <= pd.Timestamp(init) <= pd.Timestamp(TEST_END):
+            files.append((init, f))
+    return [f for _, f in sorted(files)]
 
 
-def lead_vals_to_hours(lead_vals: np.ndarray) -> list[int]:
-    sample = lead_vals[0]
-    if isinstance(sample, np.timedelta64):
-        return [int(v / np.timedelta64(1, "h")) for v in lead_vals]
-    if hasattr(sample, "total_seconds"):
-        return [int(v.total_seconds() / 3600) for v in lead_vals]
-    return [int(v) for v in lead_vals]
-
-
-def build_windpark_cerra_indices(
-    metadata_path: Path,
-    cerra_lat: np.ndarray,
-    cerra_lon: np.ndarray,
-    windparks: list[str],
-) -> list[int | None]:
-    """Map each windpark name to a flat CERRA cell index (None if not found in metadata)."""
-    meta = pd.read_csv(metadata_path)
-    cerra_keys = {
-        (round(la, 6), round(lo, 6)): i
-        for i, (la, lo) in enumerate(zip(cerra_lat, cerra_lon))
-    }
-    farm_to_cerra: dict[str, int] = {}
-    for _, row in meta.iterrows():
-        key = (round(row["cerra_grid_lat"], 6), round(row["cerra_grid_lon"], 6))
-        if key in cerra_keys:
-            farm_to_cerra[str(row["farm"])] = cerra_keys[key]
-    return [farm_to_cerra.get(wp) for wp in windparks]
+def nearest_cell(lats, lons, lat0, lon0) -> int:
+    return int(np.argmin((lats - lat0) ** 2 + (lons - lon0) ** 2))
 
 
 def main():
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_dir = OUT_DIR / MODEL
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    test_dates = pickle.load(open(TEST_DATES_PKL, "rb"))
     specs = load_specs(SPECS_PATH)
     counts_df = load_counts(COUNTS_PATH)
+    turbine_types = list(counts_df.columns)
+    counts = counts_df.reindex(windparks).fillna(0.0)  # (parks x types)
 
-    ds_cerra = xr.open_zarr(CERRA_PATH, consolidated=False)
-    cerra_vars = list(ds_cerra.attrs["variables"])
-    cerra_lat = ds_cerra["latitudes"].values
-    cerra_lon = ds_cerra["longitudes"].values
-    cerra_dates = pd.to_datetime(ds_cerra["dates"].values).tz_localize("UTC")
-    cerra_date_to_idx = {d: i for i, d in enumerate(cerra_dates)}
-    cerra_power_idx = cerra_vars.index("power")
+    files = list_forecasts()
+    if not files:
+        raise SystemExit(f"No forecast files for {MODEL} in {TEST_START}..{TEST_END}")
+    print(f"{MODEL}: {len(files)} forecast inits in test range")
 
-    for model_name in MODEL_NAMES:
-        fcs_dir = FCS_BASE_DIR / model_name
-        out_dir = OUT_DIR / model_name
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_prefix = f"{model_name}_PowerCurve_"
+    # forecast-grid cell per park (grid matches CERRA, so this is exact)
+    meta = pd.read_csv(METADATA_PATH).set_index("farm")
+    with xr.open_dataset(files[0]) as ds0:
+        flat = ds0["latitude"].values
+        flon = ds0["longitude"].values
+        n_steps = ds0.sizes["time"]
+    park_cell = {
+        wp: nearest_cell(flat, flon,
+                         float(meta.loc[wp, "cerra_grid_lat"]),
+                         float(meta.loc[wp, "cerra_grid_lon"]))
+        for wp in windparks
+    }
+    lead_time = np.arange(n_steps, dtype=np.int32)  # step index; verify.py *3 -> hours
 
-        f0 = fcs_dir / f"fcs.{test_dates[0]}.nc"
-        with xr.open_dataset(f0) as ds0:
-            ws0 = select_model_if_present(ds0[WS_VAR], model_name)
-            windparks = [str(x) for x in ws0["windpark"].values]
-            lead_vals_ref = ws0["lead_time"].values
-            T = int(ws0.sizes["lead_time"])
+    # observed power (truth) per park from the CERRA zarr
+    obs_series = {}
+    with _open_cerra(ZARR_PATH) as dsz:
+        pidx = list(dsz.attrs["variables"]).index("power")
+        for wp in windparks:
+            dates, _, series = _cerra_cell_series(dsz, str(METADATA_PATH), wp, ensemble=0)
+            obs_series[wp] = pd.Series(series[:, pidx], index=dates.tz_localize(None))
 
-        counts_mat = counts_df.reindex(windparks).fillna(0).to_numpy(dtype=np.float32)
-        turbine_types = list(counts_df.columns)
-        W = len(windparks)
+    acc = {wp: {"fc": [], "truth": [], "init": []} for wp in windparks}
+    for fp in tqdm(files, desc="power curve"):
+        with xr.open_dataset(fp) as ds:
+            ws = ds[WS_VAR].values                      # (T, cells)
+            tidx = pd.DatetimeIndex(ds["time"].values)  # (T,) naive
+        for wp in windparks:
+            ws_wp = ws[:, park_cell[wp]]                 # (T,)
+            total = np.zeros(n_steps, dtype=np.float32)
+            row = counts.loc[wp]
+            for tname in turbine_types:
+                n = float(row[tname])
+                if n > 0:
+                    total += power_curve(ws_wp, specs[tname]) * n
+            acc[wp]["fc"].append(total)
+            acc[wp]["truth"].append(obs_series[wp].reindex(tidx).to_numpy(dtype=np.float32))
+            acc[wp]["init"].append(tidx[0])
 
-        lead_hours = lead_vals_to_hours(lead_vals_ref)
-        cerra_cell_indices = build_windpark_cerra_indices(METADATA_PATH, cerra_lat, cerra_lon, windparks)
-        valid_wis = np.array([wi for wi, ci in enumerate(cerra_cell_indices) if ci is not None], dtype=int)
-        valid_cis = np.array([ci for ci in cerra_cell_indices if ci is not None], dtype=int)
-        n_matched = len(valid_wis)
-        print(f"[{model_name}] {n_matched}/{W} windparks matched to CERRA cells")
+    for wp in windparks:
+        fc = np.stack(acc[wp]["fc"])                     # (N, T)
+        truth = np.stack(acc[wp]["truth"])               # (N, T)
+        init_dates = np.array(acc[wp]["init"], dtype="datetime64[ns]")
 
-        needed_valid = sorted({
-            ts14_to_utc(ts) + pd.Timedelta(hours=lh)
-            for ts in test_dates for lh in lead_hours
-        })
-        needed_in_cerra = [vt for vt in needed_valid if vt in cerra_date_to_idx]
-        if needed_in_cerra:
-            cerra_bulk = ds_cerra["data"].isel(
-                time=[cerra_date_to_idx[vt] for vt in needed_in_cerra],
-                variable=cerra_power_idx,
-                ensemble=0,
-            ).values  # (n_valid_times, n_cells)
-            cerra_cache = {vt.isoformat(): cerra_bulk[i] for i, vt in enumerate(needed_in_cerra)}
-        else:
-            cerra_cache = {}
-
-        N = len(test_dates)
-        forecasts_all = np.zeros((N, W, T), dtype=np.float32)
-        truths_all    = np.zeros((N, W, T), dtype=np.float32)
-        cerra_all     = np.full((N, W, T), np.nan, dtype=np.float32)
-        dates_all     = np.array([ts14_to_datetime64(ts) for ts in test_dates], dtype="datetime64[ns]")
-
-        for i, ts in enumerate(tqdm(test_dates, desc=f"[{model_name}]")):
-            fcs_path = fcs_dir / f"fcs.{ts}.nc"
-            obs_path = OBS_DIR / f"obs.{ts}.nc"
-
-            with xr.open_dataset(fcs_path) as ds_fcs:
-                ws = select_model_if_present(ds_fcs[WS_VAR], model_name)
-                ws_np = ws.transpose("windpark", "lead_time").values.astype(np.float32)
-
-            total = np.zeros((W, T), dtype=np.float32)
-            for k, tname in enumerate(turbine_types):
-                pc = power_curve(ws_np, specs[tname])
-                total += pc * counts_mat[:, k:k+1]
-            forecasts_all[i] = total
-
-            with xr.open_dataset(obs_path) as ds_obs:
-                truths_all[i] = ds_obs[OBS_VAR].transpose("windpark", "lead_time").values.astype(np.float32)
-
-            if cerra_cache and n_matched > 0:
-                init_utc = ts14_to_utc(ts)
-                for t_idx, lh in enumerate(lead_hours):
-                    vt_iso = (init_utc + pd.Timedelta(hours=lh)).isoformat()
-                    if vt_iso in cerra_cache:
-                        cerra_all[i, valid_wis, t_idx] = cerra_cache[vt_iso][valid_cis]
-
-        lead_time = np.arange(T, dtype=np.int32)
-
-        for wi, farm in enumerate(windparks):
-            ds_out = xr.Dataset(
-                {
-                    "forecast":    (("date", "lead_time"), forecasts_all[:, wi, :]),
-                    "truth":       (("date", "lead_time"), truths_all[:, wi, :]),
-                    "truth_cerra": (("date", "lead_time"), cerra_all[:, wi, :]),
-                },
-                coords={"date": dates_all, "lead_time": lead_time},
-                attrs={
-                    "windpark": farm,
-                    "model_name": model_name,
-                    "ws_variable": WS_VAR,
-                    "obs_variable": OBS_VAR,
-                    "lead_time_original_values": np.array(lead_vals_ref).astype(str).tolist(),
-                },
-            )
-            ds_out.to_netcdf(out_dir / f"{out_prefix}{safe_name(farm)}.nc")
-            ds_out.close()
-
-    ds_cerra.close()
+        ds_out = xr.Dataset(
+            {
+                "forecast": (("date", "lead_time"), fc.astype(np.float32)),
+                "truth": (("date", "lead_time"), truth.astype(np.float32)),
+            },
+            coords={"date": init_dates, "lead_time": lead_time},
+            attrs={"windpark": wp, "weather_model": MODEL, "ws_variable": WS_VAR},
+        )
+        out_nc = out_dir / f"{MODEL}_PowerCurve_{safe_name(wp)}.nc"
+        ds_out.to_netcdf(out_nc)
+        print(f"💾 {out_nc}  ({len(init_dates)} inits)")
 
 
 if __name__ == "__main__":

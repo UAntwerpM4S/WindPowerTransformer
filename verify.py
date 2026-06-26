@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 # ========= CONFIG =========
-MODEL_NAMES = ["VanillaPowerPP"]
+MODEL_NAMES = ["RegularWeather"]
 
 DIM = 128
 HEADS = 4
@@ -55,27 +55,35 @@ def main():
             f"{POWERCURVE_DIR}/{model}/{model}_PowerCurve_*.nc"
         ))
 
+        if not tf_files:
+            print(f"⚠️ No TEST_FCS files for {model}, skipping.")
+            continue
+
         tf_f, tf_t = _sum_over_windparks(tf_files)
-        pc_f, pc_t = _sum_over_windparks(pc_files)
+        tf_f, tf_t = xr.align(tf_f, tf_t, join="inner")
 
-        tf_f, tf_t, pc_f, pc_t = xr.align(tf_f, tf_t, pc_f, pc_t, join="inner")
-
-        lt_steps = tf_f["lead_time"].values
-        lt_hours = lt_steps * 3
-
+        lt_hours = tf_f["lead_time"].values * 3
         mae_tf = _mae_pct(tf_f, tf_t)
-        mae_pc = _mae_pct(pc_f, pc_t)
-
-        # ---- plot ----
         plt.plot(lt_hours, mae_tf, linewidth=2, label=f"{model} (TEST_FCS)")
-        plt.plot(lt_hours, mae_pc, linewidth=2, linestyle="--", label=f"{model} (PowerCurve)")
+
+        cols = {"lead_time_hours": lt_hours, "mae_test_fcs_pct": mae_tf}
+
+        # PowerCurve baseline is optional
+        if pc_files:
+            pc_f, pc_t = _sum_over_windparks(pc_files)
+            tf_f, tf_t, pc_f, pc_t = xr.align(tf_f, tf_t, pc_f, pc_t, join="inner")
+            lt_hours = tf_f["lead_time"].values * 3
+            mae_tf = _mae_pct(tf_f, tf_t)
+            mae_pc = _mae_pct(pc_f, pc_t)
+            plt.plot(lt_hours, mae_pc, linewidth=2, linestyle="--", label=f"{model} (PowerCurve)")
+            cols = {"lead_time_hours": lt_hours,
+                    "mae_test_fcs_pct": mae_tf,
+                    "mae_powercurve_pct": mae_pc}
+        else:
+            print(f"ℹ️ No PowerCurve baseline for {model}; plotting transformer only.")
 
         # ---- CSV ----
-        df = pd.DataFrame({
-            "lead_time_hours": lt_hours,
-            "mae_test_fcs_pct": mae_tf,
-            "mae_powercurve_pct": mae_pc,
-        })
+        df = pd.DataFrame(cols)
         csv_path = os.path.join(
             RESULTS_DIR,
             f"MAE_{model}_dim{DIM}_heads{HEADS}_layers{LAYERS}.csv",
