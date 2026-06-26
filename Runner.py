@@ -19,7 +19,7 @@ model_dim = 128
 n_heads = 4
 num_layers = 4
 
-ZARR_PATH = "/mnt/weatherloss/WindPower/data/EGU26/Anemoidatasets/New_Cerra_A_large.zarr"
+ZARR_PATH = "/mnt/weatherloss/WindPower/data/WindAI/Anemoidatasets/New_Cerra_A_large.zarr"
 METADATA_PATH = "/mnt/weatherloss/WindPower/data/NorthSea/Power/windfarm_metadata.csv"
 
 base_command = (

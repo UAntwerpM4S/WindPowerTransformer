@@ -27,7 +27,7 @@ def get_args():
     # ---- CERRA pseudo-forecast training ----
     parser.add_argument(
         "--zarr_path", type=str,
-        default="/mnt/weatherloss/WindPower/data/EGU26/Anemoidatasets/New_Cerra_A_large.zarr",
+        default="/mnt/weatherloss/WindPower/data/WindAI/Anemoidatasets/New_Cerra_A_large.zarr",
         help="Anemoi-format CERRA zarr (data/latitudes/longitudes/dates, attrs.variables)",
     )
     parser.add_argument(
