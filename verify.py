@@ -47,9 +47,15 @@ def _sum_over_windparks(files):
     return xr.align(f_sum, t_sum, join="inner")
 
 
-def _mae_pct(f, t):
-    mae = np.abs(f - t).mean(dim="date", skipna=True).values
-    return (mae / TOTAL_CAPACITY_MW) * 100.0
+def _metrics(f, t):
+    """Per-lead MAE and RMSE (% of capacity), aggregated over inits ('date')."""
+    diff = f - t
+    mae_mw = np.abs(diff).mean(dim="date", skipna=True).values
+    rmse_mw = np.sqrt((diff ** 2).mean(dim="date", skipna=True).values)
+    return {
+        "mae_pct": mae_mw / TOTAL_CAPACITY_MW * 100.0,
+        "rmse_pct": rmse_mw / TOTAL_CAPACITY_MW * 100.0,
+    }
 
 
 def main():
@@ -71,17 +77,22 @@ def main():
         tf_f, tf_t = _sum_over_windparks(tf_files)
 
         lt_hours = tf_f["lead_time"].values * 3
-        mae_tf = _mae_pct(tf_f, tf_t)
-        plt.plot(lt_hours, mae_tf, linewidth=2, label=f"{model} (TEST_FCS)")
+        m_tf = _metrics(tf_f, tf_t)
+        plt.plot(lt_hours, m_tf["mae_pct"], linewidth=2, label=f"{model} (TEST_FCS)")
 
-        cols = {"lead_time_hours": lt_hours, "mae_test_fcs_pct": mae_tf}
+        cols = {
+            "lead_time_hours": lt_hours,
+            "mae_test_fcs_pct": m_tf["mae_pct"],
+            "rmse_test_fcs_pct": m_tf["rmse_pct"],
+        }
 
         # PowerCurve baseline is optional: per-farm power curve, summed over farms
         if pc_files:
             pc_f, pc_t = _sum_over_windparks(pc_files)
-            mae_pc = _mae_pct(pc_f, pc_t)
-            plt.plot(lt_hours, mae_pc, linewidth=2, linestyle="--", label=f"{model} (PowerCurve)")
-            cols["mae_powercurve_pct"] = mae_pc
+            m_pc = _metrics(pc_f, pc_t)
+            plt.plot(lt_hours, m_pc["mae_pct"], linewidth=2, linestyle="--", label=f"{model} (PowerCurve)")
+            cols["mae_powercurve_pct"] = m_pc["mae_pct"]
+            cols["rmse_powercurve_pct"] = m_pc["rmse_pct"]
         else:
             print(f"ℹ️ No PowerCurve baseline for {model}; plotting transformer only.")
 
