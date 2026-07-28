@@ -200,6 +200,8 @@ def build_one(cells_path: Path, obs: pd.DataFrame, args) -> None:
     enc_vars = list(WIND_VARS) + ["cf_obs", "power_obs", "G", "cap_cell"]
     if has_cf_lam:
         enc_vars.append("cf_lam")
+    if "turbinecount" in out:
+        enc_vars.append("turbinecount")
     enc = {v: {"zlib": True, "complevel": 4} for v in enc_vars}
     out_path = args.out / cells_path.name.replace("cells_", "dataset_")
     tmp = out_path.with_suffix(".nc.tmp")

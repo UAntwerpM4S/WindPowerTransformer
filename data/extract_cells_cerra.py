@@ -107,6 +107,15 @@ def main() -> None:
     shared = int(((G > 0).sum(0) > 1).sum())
     print(f"  {C} cells, {cap_cell.sum():.1f} MW, {shared} shared")
 
+    # turbines per cell (static forcing, like the LAM's turbinecount). Reassign here since we
+    # have the turbine table; store it so the loader gets it straight from the file.
+    coslat = np.cos(np.radians(float(cerra_lat.mean())))
+    _tree = cKDTree(np.c_[to_180(cerra_lon) * coslat, cerra_lat])
+    _, _tc = _tree.query(np.c_[to_180(turbines["longitude"]) * coslat,
+                               turbines["latitude"].to_numpy()], k=1)
+    count_cell = (pd.Series(_tc).value_counts().reindex(cell_idx).fillna(0)
+                  .to_numpy().astype(np.float64))
+
     # wind at the 15 cells for ALL times, once (small: T x C x 6)
     fidx = [var_names.index(v) for v in WIND_VARS]
     da = (ds["data"].isel(ensemble=args.ensemble)
@@ -146,6 +155,7 @@ def main() -> None:
         | {
             "G":          (("farm", "cell"), G),
             "cap_cell":   ("cell", cap_cell),
+            "turbinecount": ("cell", count_cell),
             "valid_time": (("init", "lead_time"), valid),
         },
         coords={
@@ -172,7 +182,8 @@ def main() -> None:
     ds_out["cap_cell"].attrs["units"] = "MW"
 
     out_path = args.out / f"cells_{args.region}_CERRA.nc"
-    enc = {v: {"zlib": True, "complevel": 4} for v in list(WIND_VARS) + ["G", "cap_cell"]}
+    enc = {v: {"zlib": True, "complevel": 4}
+           for v in list(WIND_VARS) + ["G", "cap_cell", "turbinecount"]}
     tmp = out_path.with_suffix(".nc.tmp")
     ds_out.to_netcdf(tmp, format="NETCDF4", engine="netcdf4", encoding=enc)
     tmp.replace(out_path)

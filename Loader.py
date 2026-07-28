@@ -57,19 +57,23 @@ def farm_rated_ws(farms_df, specs) -> dict:
 
 
 def cell_static(ds, farms_df, specs):
-    """(C, 2) static features per cell: [capacity, capacity-weighted rated_ws].
+    """Static features per cell — the LAM's forcings + rated_ws:
+        [capacity, turbinecount, capacity-weighted rated_ws].
 
-    capacity = cap_cell (in the file). rated_ws = sum_f G[f,c]*rws_f / sum_f G[f,c] -- uses only
-    the file's G and the farm rated speeds, so it is independent of cell ordering.
+    capacity and turbinecount come from the file; rated_ws = sum_f G[f,c]*rws_f / sum_f G[f,c]
+    from the file's G and the farm rated speeds. All are per-cell physical values, independent of
+    cell ordering, so a model trained on the CERRA cells applies unchanged to forecast cells.
     """
     G = ds["G"].values                                    # (F, C)
     cap_cell = ds["cap_cell"].values                      # (C,)
+    count_cell = ds["turbinecount"].values                # (C,)
     farms = [str(f) for f in ds["farm"].values]
     rws = farm_rated_ws(farms_df, specs)
     rws_vec = np.array([rws[f] for f in farms])           # (F,)
     with np.errstate(invalid="ignore"):
         ratedws_cell = (G * rws_vec[:, None]).sum(0) / G.sum(0)
-    return np.stack([cap_cell, ratedws_cell], axis=1).astype(np.float32), ["capacity", "rated_ws"]
+    static = np.stack([cap_cell, count_cell, ratedws_cell], axis=1).astype(np.float32)
+    return static, ["capacity", "turbinecount", "rated_ws"]
 
 
 # --------------------------------------------------------------------------- #
