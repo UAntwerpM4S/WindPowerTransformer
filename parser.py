@@ -7,16 +7,19 @@ def get_args():
     # Model — input_dim = 6 wind + 3 static cell features (capacity, turbinecount, rated_ws)
     parser.add_argument("--input_dim", type=int, default=9, help="6 wind + 3 static cell features")
 
-    # Transformer architecture
-    parser.add_argument("--model_dim", type=int, default=128)
+    # Transformer architecture — smaller defaults: the wind->CF map is simple and a big model
+    # overfit within 2 epochs (train/val gap ~3.4x). dim64/2 layers + dropout generalises better.
+    parser.add_argument("--model_dim", type=int, default=64)
     parser.add_argument("--n_heads", type=int, default=4)
-    parser.add_argument("--num_layers", type=int, default=4)
+    parser.add_argument("--num_layers", type=int, default=2)
     parser.add_argument("--mlp_mult", type=int, default=4)
+    parser.add_argument("--dropout", type=float, default=0.1)
 
     # Training
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--epochs", type=int, default=40)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--patience", type=int, default=6)
 
     # Checkpointing

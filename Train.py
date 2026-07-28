@@ -77,14 +77,18 @@ def main():
              cell_lat=geom["cell_lat"], cell_lon=geom["cell_lon"])
 
     model = TemporalTransformer(
-        input_dim=input_dim,        # auto: 6 wind (+cf_lam) + 2 static
+        input_dim=input_dim,        # auto: 6 wind (+cf_lam) + 3 static
         model_dim=args.model_dim,
         n_heads=args.n_heads,
         num_layers=args.num_layers,
         mlp_mult=args.mlp_mult,
+        dropout=args.dropout,
     ).to(device)
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"model: dim{args.model_dim} x{args.num_layers} layers, dropout {args.dropout}, "
+          f"{n_params/1e3:.0f}k params")
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     best_val_loss = float("inf")
     patience_counter = 0

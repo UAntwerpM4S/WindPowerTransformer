@@ -45,26 +45,28 @@ class TemporalAttention(nn.Module):
         return self.out_proj(out)
 
 class TransformerBlock(nn.Module):
-    def __init__(self, dim, n_heads, mlp_mult=4):
+    def __init__(self, dim, n_heads, mlp_mult=4, dropout=0.0):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
         self.attn = TemporalAttention(dim, n_heads)
         self.norm2 = nn.LayerNorm(dim)
+        self.drop = nn.Dropout(dropout)
 
         self.mlp = nn.Sequential(
             nn.Linear(dim, dim * mlp_mult),
             nn.GELU(),
-            nn.Linear(dim * mlp_mult, dim)
+            nn.Dropout(dropout),
+            nn.Linear(dim * mlp_mult, dim),
         )
 
     def forward(self, x):
-        x = x + self.attn(self.norm1(x))
+        x = x + self.drop(self.attn(self.norm1(x)))
         x = x + self.mlp(self.norm2(x))
         return x
 
 class TemporalTransformer(nn.Module):
     def __init__(self, input_dim, model_dim=64, n_heads=4, num_layers=4, mlp_mult=4,
-                 use_posenc=True, max_len=4096, out_range=None):
+                 use_posenc=True, max_len=4096, out_range=None, dropout=0.0):
         """out_range: (lo, hi) bounds the output with hardtanh.
 
         DEFAULT None (train UNBOUNDED, clamp at inference). Bounding DURING training is a trap
@@ -75,13 +77,14 @@ class TemporalTransformer(nn.Module):
         the occasional overshoot is clamped to [0,1] at inference/aggregation time."""
         super().__init__()
         self.input_proj = nn.Linear(input_dim, model_dim)
+        self.in_drop = nn.Dropout(dropout)
 
         self.use_posenc = use_posenc
         if use_posenc:
             self.posenc = SinusoidalPE(model_dim, max_len=max_len)
 
         self.blocks = nn.Sequential(*[
-            TransformerBlock(model_dim, n_heads, mlp_mult) for _ in range(num_layers)
+            TransformerBlock(model_dim, n_heads, mlp_mult, dropout) for _ in range(num_layers)
         ])
 
         self.output_proj = nn.Linear(model_dim, 1)  # per time step output
@@ -89,7 +92,7 @@ class TemporalTransformer(nn.Module):
 
     def forward(self, x):
         # x: (batch, lead_time, input_dim)
-        x = self.input_proj(x)  # (B, T, D)
+        x = self.in_drop(self.input_proj(x))  # (B, T, D)
         if self.use_posenc:
             x = self.posenc(x)              # (B, T, D)
         x = self.blocks(x)      # (B, T, D)
