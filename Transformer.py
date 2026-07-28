@@ -64,9 +64,15 @@ class TransformerBlock(nn.Module):
 
 class TemporalTransformer(nn.Module):
     def __init__(self, input_dim, model_dim=64, n_heads=4, num_layers=4, mlp_mult=4,
-                 use_posenc=True, max_len=4096, out_range=(0.0, 1.0)):
-        """out_range: (lo, hi) bounds the output with hardtanh, mirroring the LAM's
-        HardtanhBounding[0,1] on capacityfactor. Pass None to leave the output unbounded."""
+                 use_posenc=True, max_len=4096, out_range=None):
+        """out_range: (lo, hi) bounds the output with hardtanh.
+
+        DEFAULT None (train UNBOUNDED, clamp at inference). Bounding DURING training is a trap
+        here: hardtanh has zero gradient once saturated, so a single large Adam step that pushes
+        the output past a boundary collapses the model to a constant it can never escape (observed:
+        train/val MSE froze at E[cf^2]). The LAM survives HardtanhBounding only because of its tiny
+        warmup LR schedule. For a [0,1] target, plain MSE already keeps predictions in range, and
+        the occasional overshoot is clamped to [0,1] at inference/aggregation time."""
         super().__init__()
         self.input_proj = nn.Linear(input_dim, model_dim)
 
