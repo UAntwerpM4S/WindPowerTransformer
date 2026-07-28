@@ -56,8 +56,8 @@ def main():
     args = get_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    print(f"Training CERRA power model | park={args.windpark} | device={device}")
-    print(f"zarr={args.zarr_path}")
+    print(f"Training cell-level power model | run_tag={args.run_tag} | device={device}")
+    print(f"dataset={args.dataset_nc}")
 
     from pathlib import Path
     train_loader, val_loader, _, geom, input_dim = loader_prepare(
@@ -95,8 +95,8 @@ def main():
     save_path = os.path.join(
         model_dir,
         f"{args.run_tag}_dim{args.model_dim}_cells_"
-        f"in{args.input_dim}_heads{args.n_heads}_layers{args.num_layers}_"
-        f"mlp{args.mlp_mult}_lr{args.lr}_lead{args.lead_hours}_ep{args.epochs}.pt",
+        f"in{input_dim}_heads{args.n_heads}_layers{args.num_layers}_"
+        f"mlp{args.mlp_mult}_lr{args.lr}_ep{args.epochs}.pt",
     )
 
     for epoch in range(args.epochs):
