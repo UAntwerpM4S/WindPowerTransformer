@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Score power forecasts against observations — DIRECT, POWER CURVE, TRANSFORMER, PERSISTENCE.
+"""Score power forecasts against observations — DIRECT, POWER CURVE, TRANSFORMER.
 
-An extension of WindAI's score_power_configs.py: same reconstruction, power curves, persistence,
-metrics, decomposition and plots, with a THIRD forecast method added — the cell-level model's
+An extension of WindAI's score_power_configs.py: same reconstruction, power curves, metrics,
+decomposition and plots, with a THIRD forecast method added — the cell-level model's
 post-processed capacity factor produced by infer_cf.py:
 
   DIRECT       the LAM's own `capacityfactor`, reconstructed to farms via G           (solid)
   POWERCURVE   the LAM's ws100 pushed through each farm's specs power curve            (dashed)
   TRANSFORMER  infer_cf.py's predicted CF (model applied to forecast wind), via G      (dash-dot)
-  PERSISTENCE  P_obs held flat from the init time — the honest 3-36 h floor            (dotted)
 
 TRANSFORMER reconstructs identically to DIRECT: P(farm,t) = sum_cell G[farm,cell]*cf(cell,t).
 The only difference is whose CF field it is — the LAM's native one (DIRECT) or the post-processor's
@@ -16,8 +15,8 @@ The only difference is whose CF field it is — the LAM's native one (DIRECT) or
 
 Every method is scored on the init times common to all forecast runs AND all transformer files, so
 the comparison uses one identical sample. Metrics per farm and for the regional total, by lead:
-MAE (MW and % of capacity), RMSE, BIAS, skill vs persistence, and the MSE bias/amplitude/phase
-decomposition of the total.
+MAE (MW and % of capacity), RMSE, BIAS, and the MSE bias/amplitude/phase decomposition of the
+total.
 
 Usage:
   python score_cf.py                       # SETTINGS below
@@ -230,7 +229,7 @@ def main() -> None:
             common = sorted(set(common) & set(t["inits"]))
         print(f"transformer runs: {list(tf)}  -> {len(common)} inits common to all methods")
     else:
-        print("no transformer cf_*.nc found -- scoring DIRECT/POWERCURVE/PERSISTENCE only")
+        print("no transformer cf_*.nc found -- scoring DIRECT/POWERCURVE only")
     if not common:
         raise SystemExit("no init times common to all methods")
 
@@ -282,7 +281,7 @@ def main() -> None:
     series = ([(r, "direct") for r in fmaps if has_power[r]]
               + [(r, "curve") for r in fmaps]
               + [(r, "transformer") for r in tf_power])
-    keys = series + [("persistence", "persist")]
+    keys = list(series)
     z2 = lambda: np.zeros((F, L))
     sae = {s: z2() for s in keys}; sse = {s: z2() for s in keys}
     sbe = {s: z2() for s in keys}; n = {s: z2() for s in keys}
@@ -312,17 +311,6 @@ def main() -> None:
         if key not in recon_cache:
             recon_cache[key] = build_reconstruction(lat, lon, turbines, farms)
         return recon_cache[key]
-
-    # ---- persistence ----
-    for init in common:
-        if init not in obs.index:
-            continue
-        pref = obs.loc[init, farms].to_numpy(float)
-        for lh in args.leads:
-            vt = init + pd.Timedelta(hours=lh)
-            if vt in obs.index:
-                accumulate(("persistence", "persist"), pref,
-                           obs.loc[vt, farms].to_numpy(float), lead_pos[lh])
 
     # ---- the runs: direct + curve + transformer ----
     for label, fmap in fmaps.items():
@@ -368,8 +356,7 @@ def main() -> None:
         bias_t = {s: sbe_t[s] / n_t[s] for s in keys}
         nmae_t = {s: 100.0 * mae_t[s] / total_cap for s in keys}
 
-    PERS = ("persistence", "persist")
-    lbl = lambda s: (f"{s[0]} · {METHOD_LABEL[s[1]]}" if s != PERS else "persistence")
+    lbl = lambda s: f"{s[0]} · {METHOD_LABEL[s[1]]}"
 
     def decompose(s, k=None):
         sl = slice(None) if k is None else slice(k, k + 1)
@@ -390,30 +377,27 @@ def main() -> None:
 
     # ---- 1. total MAE by lead ----
     print(f"\nTOTAL {args.region} power — MAE as % of {total_cap:.0f} MW")
-    hdr = "lead  " + "".join(f"{lbl(s):>26s}" for s in series + [PERS])
+    hdr = "lead  " + "".join(f"{lbl(s):>26s}" for s in series)
     print(hdr); print("-" * len(hdr))
     for lh in args.leads:
         k = lead_pos[lh]
-        print(f"+{lh:2d}h  " + "".join(f"{nmae_t[s][k]:25.2f}%" for s in series + [PERS]))
+        print(f"+{lh:2d}h  " + "".join(f"{nmae_t[s][k]:25.2f}%" for s in series))
 
     # ---- 2. summary pooled over leads ----
     print(f"\nSUMMARY — {args.region} total, pooled over all leads")
-    print(f"{'series':34s} {'MAE%':>7s} {'RMSE MW':>9s} {'bias MW':>9s} {'skill vs persist':>17s}")
-    print("-" * 80)
-    pers_mae = np.nansum(sae_t[PERS]) / max(np.nansum(n_t[PERS]), 1)
+    print(f"{'series':34s} {'MAE%':>7s} {'RMSE MW':>9s} {'bias MW':>9s}")
+    print("-" * 63)
     summary_rows = []
-    for s in series + [PERS]:
+    for s in series:
         N = np.nansum(n_t[s])
         if N == 0:
             continue
         m = np.nansum(sae_t[s]) / N; r = np.sqrt(np.nansum(sse_t[s]) / N)
-        b = np.nansum(sbe_t[s]) / N; sk = 1 - m / pers_mae if pers_mae > 0 else np.nan
-        print(f"{lbl(s):34s} {100*m/total_cap:6.2f}% {r:9.1f} {b:+9.1f} "
-              f"{('' if s == PERS else f'{sk:+.3f}'):>17s}")
+        b = np.nansum(sbe_t[s]) / N
+        print(f"{lbl(s):34s} {100*m/total_cap:6.2f}% {r:9.1f} {b:+9.1f}")
         d = decompose(s)
         summary_rows.append(dict(series=lbl(s), run=s[0], method=s[1], mae_mw=m,
                                  nmae_pct=100 * m / total_cap, rmse_mw=r, bias_mw=b,
-                                 skill_vs_persistence=np.nan if s == PERS else sk,
                                  mse=d["mse"], bias2=d["bias2"], amplitude=d["amp"],
                                  phase=d["phase"], sd_pred=d["sd_p"], sd_obs=d["sd_o"],
                                  corr=d["r"], var_ratio=d["var_ratio"], n=int(N)))
@@ -482,7 +466,7 @@ def main() -> None:
     fig.savefig(p, dpi=140); plt.close(fig); print(f"saved {p}")
 
     # ---- MSE decomposition + variance ratio ----
-    dec_all = {s: decompose(s) for s in series + [PERS]}
+    dec_all = {s: decompose(s) for s in series}
     fig, (axL, axR) = plt.subplots(1, 2, figsize=(14, 5.8))
     labs = [lbl(s) for s in series]
     b2 = np.array([dec_all[s]["bias2"] for s in series])
@@ -512,7 +496,7 @@ def main() -> None:
     print(f"{'series':34s} {'RMSE':>8s} {'bias²':>9s} {'ampl':>9s} {'phase':>9s} "
           f"{'σp/σo':>7s} {'r':>6s}")
     print("-" * 88)
-    for s in series + [PERS]:
+    for s in series:
         d = dec_all[s]
         if not np.isfinite(d["mse"]):
             continue
@@ -528,16 +512,11 @@ def main() -> None:
             k = lead_pos[lh]
             rows.append(dict(run=s[0], method=s[1], lead_hours=lh, scope="TOTAL",
                              mae_mw=mae_t[s][k], nmae_pct=nmae_t[s][k], rmse_mw=rmse_t[s][k],
-                             bias_mw=bias_t[s][k],
-                             skill_vs_persistence=(np.nan if s == PERS else
-                                                   1 - mae_t[s][k] / mae_t[PERS][k]),
-                             n=int(n_t[s][k])))
+                             bias_mw=bias_t[s][k], n=int(n_t[s][k])))
             for i, farm in enumerate(farms):
                 rows.append(dict(run=s[0], method=s[1], lead_hours=lh, scope=farm,
                                  mae_mw=mae[s][i, k], nmae_pct=nmae[s][i, k],
                                  rmse_mw=rmse[s][i, k], bias_mw=bias[s][i, k],
-                                 skill_vs_persistence=(np.nan if s == PERS else
-                                                       1 - mae[s][i, k] / mae[PERS][i, k]),
                                  n=int(n[s][i, k])))
     pd.DataFrame(rows).to_csv(args.out / f"scores_{args.region}.csv", index=False)
     print(f"saved {args.out / f'scores_{args.region}.csv'}")
