@@ -49,10 +49,13 @@ import xarray as xr
 WPOWER_DIR = Path("/mnt/weatherloss/WindPower/data/WPDistr")
 CELLS_DIR  = Path("/mnt/weatherloss/WindPowerTransformer/data/cells")
 
-# split by INIT month, inclusive (from data/splitdates.py)
-TRAIN_MONTHS = ((2024, 8), (2025, 3))
-VAL_MONTHS   = ((2025, 4), (2025, 5))
-TEST_MONTHS  = ((2025, 6), (2025, 7))
+# Split by INIT month, inclusive.  These are the POST-PROCESSOR's splits, which are not the
+# LAM's (WindAI/training/WPDistr/WPDistr.yaml: LAM train ends 2024-01-31, val 2024-02..07,
+# test 2024-08..2025-07).  Everything below starts 2024-02-01, so every forecast the
+# post-processor ever sees is out-of-sample for the LAM that produced it.
+TRAIN_MONTHS = ((2024, 2), (2025, 1))    # 12 months: a full seasonal cycle
+VAL_MONTHS   = ((2025, 2), (2025, 3))
+TEST_MONTHS  = ((2025, 4), (2025, 7))
 GAP_HOURS    = 36            # forecast length: the overlap a split boundary has to clear
 
 CF_MAX = 1.05                # same guard as build_power.py: above this, capacity/obs disagree
@@ -148,13 +151,18 @@ def build_one(cells_path: Path, obs: pd.DataFrame, args) -> None:
     cf_obs = cf_obs.reshape(N, L, C).astype(np.float32)
     P_farm = P_flat.reshape(N, L, F).astype(np.float32)
 
-    # a quick read on what the post-processor has to beat
-    cf_lam = ds["cf_lam"].values
-    both = np.isfinite(cf_obs) & np.isfinite(cf_lam)
-    if both.any():
-        o, p = cf_obs[both], cf_lam[both]
-        print(f"  cell-level LAM vs obs: bias {np.mean(p - o):+.4f}  MAE {np.mean(np.abs(p - o)):.4f}  "
-              f"sd_p/sd_o {p.std() / o.std():.3f}  r {np.corrcoef(p, o)[0, 1]:.3f}")
+    # a quick read on what the post-processor has to beat (only the forecast tier has cf_lam;
+    # the CERRA-truth cells file is wind-only, so skip it there)
+    has_cf_lam = "cf_lam" in ds
+    if has_cf_lam:
+        cf_lam = ds["cf_lam"].values
+        both = np.isfinite(cf_obs) & np.isfinite(cf_lam)
+        if both.any():
+            o, p = cf_obs[both], cf_lam[both]
+            print(f"  cell-level LAM vs obs: bias {np.mean(p - o):+.4f}  MAE {np.mean(np.abs(p - o)):.4f}  "
+                  f"sd_p/sd_o {p.std() / o.std():.3f}  r {np.corrcoef(p, o)[0, 1]:.3f}")
+    else:
+        print("  no cf_lam in this cells file (CERRA-truth, wind-only)")
 
     # ---- split ----
     inits = pd.DatetimeIndex(ds["init"].values)
@@ -189,8 +197,10 @@ def build_one(cells_path: Path, obs: pd.DataFrame, args) -> None:
     out.attrs["splits"] = (f"train {args.train_months} | val {args.val_months} | "
                            f"test {args.test_months} | gap {args.gap_hours} h")
 
-    enc = {v: {"zlib": True, "complevel": 4}
-           for v in list(WIND_VARS) + ["cf_lam", "cf_obs", "power_obs", "G", "cap_cell"]}
+    enc_vars = list(WIND_VARS) + ["cf_obs", "power_obs", "G", "cap_cell"]
+    if has_cf_lam:
+        enc_vars.append("cf_lam")
+    enc = {v: {"zlib": True, "complevel": 4} for v in enc_vars}
     out_path = args.out / cells_path.name.replace("cells_", "dataset_")
     tmp = out_path.with_suffix(".nc.tmp")
     out.to_netcdf(tmp, format="NETCDF4", engine="netcdf4", encoding=enc)

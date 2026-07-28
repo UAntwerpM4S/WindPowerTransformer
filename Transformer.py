@@ -63,7 +63,10 @@ class TransformerBlock(nn.Module):
         return x
 
 class TemporalTransformer(nn.Module):
-    def __init__(self, input_dim, model_dim=64, n_heads=4, num_layers=4, mlp_mult=4,use_posenc=True, max_len=4096):
+    def __init__(self, input_dim, model_dim=64, n_heads=4, num_layers=4, mlp_mult=4,
+                 use_posenc=True, max_len=4096, out_range=(0.0, 1.0)):
+        """out_range: (lo, hi) bounds the output with hardtanh, mirroring the LAM's
+        HardtanhBounding[0,1] on capacityfactor. Pass None to leave the output unbounded."""
         super().__init__()
         self.input_proj = nn.Linear(input_dim, model_dim)
 
@@ -76,12 +79,17 @@ class TemporalTransformer(nn.Module):
         ])
 
         self.output_proj = nn.Linear(model_dim, 1)  # per time step output
+        self.out_range = out_range
 
     def forward(self, x):
         # x: (batch, lead_time, input_dim)
         x = self.input_proj(x)  # (B, T, D)
-        if self.use_posenc:                 
+        if self.use_posenc:
             x = self.posenc(x)              # (B, T, D)
         x = self.blocks(x)      # (B, T, D)
         x = self.output_proj(x).squeeze(-1)  # (B, T)
+        if self.out_range is not None:
+            # capacityfactor is physically in [0,1]; bound the prediction like the LAM does, so a
+            # stray value can't corrupt the aggregated MW (MW = CF * capacity downstream).
+            x = F.hardtanh(x, min_val=self.out_range[0], max_val=self.out_range[1])
         return x

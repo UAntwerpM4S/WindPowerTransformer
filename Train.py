@@ -59,24 +59,25 @@ def main():
     print(f"Training CERRA power model | park={args.windpark} | device={device}")
     print(f"zarr={args.zarr_path}")
 
-    train_loader, val_loader, _, _ = loader_prepare(
-        windpark=args.windpark,
-        zarr_path=args.zarr_path,
-        metadata_path=args.metadata_path,
+    from pathlib import Path
+    train_loader, val_loader, _, geom, input_dim = loader_prepare(
+        dataset_nc=Path(args.dataset_nc),
+        farms_csv=args.farms_csv,
+        specs_csv=args.specs_csv,
         run_tag=args.run_tag,
-        train_range=(args.train_start, args.train_end),
-        val_range=(args.val_start, args.val_end),
-        test_range=(args.test_start, args.test_end),
         batch_size=args.batch_size,
-        obs_csv=args.obs_csv,
-        lead_hours=args.lead_hours,
-        freq_hours=args.freq_hours,
-        stride=args.stride,
-        ensemble=args.ensemble,
     )
+    print(f"input_dim (auto from dataset): {input_dim}")
+
+    # save the cell->farm aggregation geometry next to the checkpoint (needed to score later)
+    geom_dir = os.path.join("artifacts", str(args.run_tag))
+    os.makedirs(geom_dir, exist_ok=True)
+    np.savez(os.path.join(geom_dir, "cell_geom.npz"),
+             farms=np.array(geom["farms"]), G=geom["G"], cap_cell=geom["cap_cell"],
+             cell_lat=geom["cell_lat"], cell_lon=geom["cell_lon"])
 
     model = TemporalTransformer(
-        input_dim=args.input_dim,   # 6
+        input_dim=input_dim,        # auto: 6 wind (+cf_lam) + 2 static
         model_dim=args.model_dim,
         n_heads=args.n_heads,
         num_layers=args.num_layers,
@@ -93,7 +94,7 @@ def main():
     os.makedirs(model_dir, exist_ok=True)
     save_path = os.path.join(
         model_dir,
-        f"{args.run_tag}_dim{args.model_dim}_park{args.windpark}_"
+        f"{args.run_tag}_dim{args.model_dim}_cells_"
         f"in{args.input_dim}_heads{args.n_heads}_layers{args.num_layers}_"
         f"mlp{args.mlp_mult}_lr{args.lr}_lead{args.lead_hours}_ep{args.epochs}.pt",
     )
