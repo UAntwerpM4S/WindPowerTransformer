@@ -78,9 +78,10 @@ def build_reconstruction(fc_lat, fc_lon, turbines, farms):
     cells the scorer uses.
 
     Returns:
-      cell_idx : forecast-cell indices that hold turbines
-      G        : (n_farms, n_cells) with G[f,j] = capacity of farm f in cell_idx[j]
-      cap_cell : (n_cells,) total capacity per cell
+      cell_idx   : forecast-cell indices that hold turbines
+      G          : (n_farms, n_cells) with G[f,j] = capacity of farm f in cell_idx[j]
+      cap_cell   : (n_cells,) total capacity per cell
+      count_cell : (n_cells,) number of turbines per cell (LAM turbinecount forcing)
     """
     coslat = np.cos(np.radians(float(fc_lat.mean())))
     tree = cKDTree(np.c_[to_180(fc_lon) * coslat, fc_lat])
@@ -96,7 +97,8 @@ def build_reconstruction(fc_lat, fc_lon, turbines, farms):
     for (farm, c), cap in t.groupby(["farm", "cell"])["capacity_mw"].sum().items():
         G[fpos[farm], cpos[int(c)]] = cap
     cap_cell = t.groupby("cell")["capacity_mw"].sum().reindex(cell_idx).to_numpy()
-    return cell_idx, G, cap_cell
+    count_cell = t.groupby("cell").size().reindex(cell_idx).fillna(0).to_numpy().astype(np.float64)
+    return cell_idx, G, cap_cell, count_cell
 
 
 def grid_key(lat, lon):
@@ -170,7 +172,7 @@ def main() -> None:
         for f in files:
             with xr.open_dataset(f) as ds:
                 if all(v in ds for v in in_vars):
-                    cell_idx, G, cap_cell = build_reconstruction(
+                    cell_idx, G, cap_cell, count_cell = build_reconstruction(
                         ds["latitude"].values, ds["longitude"].values, turbines, farms)
                     cell_lat = ds["latitude"].values[cell_idx].astype(np.float64)
                     cell_lon = to_180(ds["longitude"].values[cell_idx])
@@ -252,10 +254,11 @@ def main() -> None:
             {name: (("init", "lead_time", "cell"), arr[:, :, :, v])
              for v, name in enumerate(WIND_VARS)}
             | {
-                "cf_lam":     (("init", "lead_time", "cell"), cf),
-                "G":          (("farm", "cell"), G),
-                "cap_cell":   ("cell", cap_cell),
-                "valid_time": (("init", "lead_time"), valid),
+                "cf_lam":       (("init", "lead_time", "cell"), cf),
+                "G":            (("farm", "cell"), G),
+                "cap_cell":     ("cell", cap_cell),
+                "turbinecount": ("cell", count_cell),
+                "valid_time":   (("init", "lead_time"), valid),
             },
             coords={
                 "init": init_ix.values,
@@ -292,7 +295,7 @@ def main() -> None:
 
         out_path = args.out / f"cells_{args.region}_{label}.nc"
         enc = {v: {"zlib": True, "complevel": 4}
-               for v in list(WIND_VARS) + ["cf_lam", "G", "cap_cell"]}
+               for v in list(WIND_VARS) + ["cf_lam", "G", "cap_cell", "turbinecount"]}
         tmp = out_path.with_suffix(".nc.tmp")
         ds_out.to_netcdf(tmp, format="NETCDF4", engine="netcdf4", encoding=enc)
         tmp.replace(out_path)
