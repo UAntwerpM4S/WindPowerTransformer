@@ -51,6 +51,9 @@ TRANSFORMERS = [
 REGION = "BE"
 SPLIT  = "test"                      # which split to report on
 OUT_DIR = Path("cf_scores")
+
+# which method families to score/plot (override on the CLI with --methods)
+METHODS = ["direct", "curve", "transformer", "transformer_wo"]
 # --------------------------------------------------
 
 FLEET_RE = re.compile(r"\s*(\d+)\s*x\s*(.+?)\s*$")
@@ -114,12 +117,17 @@ def main() -> None:
     ap.add_argument("--per-run-inits", action="store_true",
                     help="score each run on its OWN inits (default: intersect to common inits so "
                          "the cross-run comparison is on one identical sample)")
+    ap.add_argument("--methods", nargs="+", default=METHODS,
+                    choices=["direct", "curve", "transformer", "transformer_wo"],
+                    help="which method families to include (default: all four)")
     ap.add_argument("--cells-dir", type=Path, default=CELLS_DIR)
     ap.add_argument("--transformer-dir", type=Path, default=TRANSFORMER_DIR)
     ap.add_argument("--wpower-dir", type=Path, default=WPOWER_DIR)
     ap.add_argument("--out", type=Path, default=OUT_DIR)
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
+    enabled = set(args.methods)
+    print(f"scoring methods: {', '.join(args.methods)}")
 
     farms_df = pd.read_csv(args.wpower_dir / "farms.csv")
     specs = pd.read_csv(args.wpower_dir / "turbine_specs.csv")
@@ -158,11 +166,12 @@ def main() -> None:
         runs_data[run] = dict(G=G, obs=obs, test=test, init=init)
         present_runs.append(run)
 
-        if "cf_lam" in ds:
+        if "cf_lam" in ds and "direct" in enabled:
             method_pred[(run, "direct")] = (np.einsum("nlc,fc->nlf", ds["cf_lam"].values, G),
                                             obs, test)
-        method_pred[(run, "curve")] = (farm_power_curve(ds["ws100"].values, G, curves, farms),
-                                        obs, test)
+        if "curve" in enabled:
+            method_pred[(run, "curve")] = (farm_power_curve(ds["ws100"].values, G, curves, farms),
+                                           obs, test)
         n_te = int(test.sum())
         print(f"{run:22s} {len(init):5d} inits, {n_te} in '{args.split}'  "
               f"({init[test].min():%Y-%m-%d}..{init[test].max():%Y-%m-%d})" if n_te else
@@ -171,7 +180,7 @@ def main() -> None:
 
     # ---- transformers: reconstruct each cf_<tag>.nc and attach to its source run's obs/test ----
     for tag, run, method in TRANSFORMERS:
-        if run not in runs_data:
+        if method not in enabled or run not in runs_data:
             continue
         tfp = args.transformer_dir / f"cf_{args.region}_{tag}.nc"
         if not tfp.exists():
