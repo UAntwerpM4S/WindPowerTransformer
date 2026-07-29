@@ -155,7 +155,8 @@ def main() -> None:
     cap = farms_df.set_index("farm").loc[farms, "capacity_mw"]
     print(f"{args.region}: {len(farms)} farms, {cap.sum():.1f} MW, {len(turbines)} turbines")
 
-    in_vars = WIND_VARS + [args.power_var]
+    has_power = str(args.power_var).lower() != "none"
+    in_vars = WIND_VARS + ([args.power_var] if has_power else [])   # wind-only if power_var=none
     L = len(args.leads)
 
     for label, d in runs.items():
@@ -239,12 +240,13 @@ def main() -> None:
         N = arr.shape[0]
         init_ix = pd.DatetimeIndex(inits)
 
-        # the LAM power channel -> capacity factor, whichever way it was written
-        cf = arr[:, :, :, -1]
-        if args.power_var != "capacityfactor":
-            cf = np.divide(cf, cap_cell[None, None, :].astype(np.float32),
-                           out=np.full_like(cf, np.nan),
-                           where=cap_cell[None, None, :] > 0)
+        # the LAM power channel -> capacity factor, whichever way it was written (wind-only: none)
+        if has_power:
+            cf = arr[:, :, :, -1]
+            if args.power_var != "capacityfactor":
+                cf = np.divide(cf, cap_cell[None, None, :].astype(np.float32),
+                               out=np.full_like(cf, np.nan),
+                               where=cap_cell[None, None, :] > 0)
 
         leads = np.asarray(args.leads, dtype=np.int32)
         valid = (init_ix.values[:, None]
@@ -253,8 +255,8 @@ def main() -> None:
         ds_out = xr.Dataset(
             {name: (("init", "lead_time", "cell"), arr[:, :, :, v])
              for v, name in enumerate(WIND_VARS)}
+            | ({"cf_lam": (("init", "lead_time", "cell"), cf)} if has_power else {})
             | {
-                "cf_lam":       (("init", "lead_time", "cell"), cf),
                 "G":            (("farm", "cell"), G),
                 "cap_cell":     ("cell", cap_cell),
                 "turbinecount": ("cell", count_cell),
@@ -291,11 +293,13 @@ def main() -> None:
         ds_out["G"].attrs["units"] = "MW"
         ds_out["G"].attrs["long_name"] = "capacity of farm f inside cell c"
         ds_out["cap_cell"].attrs["units"] = "MW"
-        ds_out["cf_lam"].attrs["long_name"] = "LAM direct power forecast as a capacity factor"
+        if has_power:
+            ds_out["cf_lam"].attrs["long_name"] = "LAM direct power forecast as a capacity factor"
 
         out_path = args.out / f"cells_{args.region}_{label}.nc"
         enc = {v: {"zlib": True, "complevel": 4}
-               for v in list(WIND_VARS) + ["cf_lam", "G", "cap_cell", "turbinecount"]}
+               for v in list(WIND_VARS) + (["cf_lam"] if has_power else [])
+               + ["G", "cap_cell", "turbinecount"]}
         tmp = out_path.with_suffix(".nc.tmp")
         ds_out.to_netcdf(tmp, format="NETCDF4", engine="netcdf4", encoding=enc)
         tmp.replace(out_path)
@@ -305,8 +309,9 @@ def main() -> None:
         print(f"  {N} inits x {L} leads x {C} cells x {len(in_vars)} vars   "
               f"({init_ix.min():%Y-%m-%d} .. {init_ix.max():%Y-%m-%d}, "
               f"{finite}/{N} inits fully finite)")
-        print(f"  cf_lam: mean {np.nanmean(cf):.4f}  sd {np.nanstd(cf):.4f}  "
-              f"min {np.nanmin(cf):.4f}  max {np.nanmax(cf):.4f}")
+        if has_power:
+            print(f"  cf_lam: mean {np.nanmean(cf):.4f}  sd {np.nanstd(cf):.4f}  "
+                  f"min {np.nanmin(cf):.4f}  max {np.nanmax(cf):.4f}")
 
 
 if __name__ == "__main__":

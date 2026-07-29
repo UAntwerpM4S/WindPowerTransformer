@@ -37,8 +37,21 @@ CELLS_DIR  = Path("/mnt/weatherloss/WindPowerTransformer/data/cells")     # data
 OUT_DIR    = Path("/mnt/weatherloss/WindPowerTransformer/data/cf_forecasts")
 CKPT_DIR   = Path("checkpoints")
 
-# runs WITH cf_lam (one post-processor each). RegularWeather has no power channel -> not here.
-RUNS   = ["HighCapacityGT", "VanillaPowerGT", "VeryHighCapacityGT"]
+# One post-processor per experiment: (tag, source LAM run, use_cf_lam).
+#   tag        = run_tag it was trained under (checkpoints/<tag>/, artifacts/<tag>/); also the
+#                output file cf_<REGION>_<tag>.nc
+#   source run = which dataset_BE_<run>.nc feeds it (the wind-only variant of a power run reuses
+#                that run's dataset, just dropping cf_lam)
+#   use_cf_lam = 6 wind + cf_lam + static (True) vs wind-only 6 wind + static (False)
+EXPERIMENTS = [
+    ("HighCapacityGT",        "HighCapacityGT",     True),
+    ("VanillaPowerGT",        "VanillaPowerGT",     True),
+    ("VeryHighCapacityGT",    "VeryHighCapacityGT", True),
+    ("HighCapacityGT_wo",     "HighCapacityGT",     False),   # wind-only variants
+    ("VanillaPowerGT_wo",     "VanillaPowerGT",     False),
+    ("VeryHighCapacityGT_wo", "VeryHighCapacityGT", False),
+    ("RegularWeather",        "RegularWeather",     False),   # pure weather model (no cf_lam)
+]
 REGION = "BE"
 
 # architecture — MUST match how the per-run models were trained (Train.py defaults)
@@ -71,7 +84,6 @@ def predict_cf(model, X, device, batch=8192):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--runs", nargs="+", default=RUNS)
     ap.add_argument("--region", default=REGION)
     ap.add_argument("--cells-dir", type=Path, default=CELLS_DIR)
     ap.add_argument("--ckpt-dir", type=Path, default=CKPT_DIR)
@@ -88,17 +100,17 @@ def main():
     farms_csv = str(args.wpower_dir / "farms.csv")
     specs_csv = str(args.wpower_dir / "turbine_specs.csv")
 
-    for run in args.runs:
-        dataset = args.cells_dir / f"dataset_{args.region}_{run}.nc"
+    for tag, source_run, use_cf_lam in EXPERIMENTS:
+        dataset = args.cells_dir / f"dataset_{args.region}_{source_run}.nc"
         if not dataset.exists():
-            print(f"\n{run}: {dataset} missing -- run extract_cells + build_targets first, skipping")
+            print(f"\n{tag}: {dataset} missing -- run the builder first, skipping")
             continue
-        print(f"\n{'='*70}\n{run}\n{'='*70}")
+        print(f"\n{'='*70}\n{tag}  (source {source_run}, cf_lam={use_cf_lam})\n{'='*70}")
 
-        feats = inference_features(dataset, farms_csv, specs_csv, run_tag=run)
+        feats = inference_features(dataset, farms_csv, specs_csv, run_tag=tag, use_cf_lam=use_cf_lam)
         X = feats["X"]
         input_dim = X.shape[-1]
-        ckpt = find_ckpt(args.ckpt_dir, run, input_dim)
+        ckpt = find_ckpt(args.ckpt_dir, tag, input_dim)
 
         model = TemporalTransformer(input_dim=input_dim, model_dim=args.model_dim,
                                     n_heads=args.n_heads, num_layers=args.num_layers,
@@ -121,12 +133,13 @@ def main():
                     "farm": np.array(feats["farms"], dtype=object),
                     "cell_lat": ("cell", feats["cell_lat"]),
                     "cell_lon": ("cell", feats["cell_lon"])},
-            attrs={"run": run, "region": args.region, "checkpoint": os.path.basename(ckpt),
+            attrs={"tag": tag, "source_run": source_run, "use_cf_lam": int(use_cf_lam),
+                   "region": args.region, "checkpoint": os.path.basename(ckpt),
                    "inputs": ", ".join(feats["feat_names"]),
                    "reconstruction": "P(farm,t) = sum_cell G[farm,cell]*cf(cell,t)"})
         out["lead_time"].attrs["units"] = "h"
         enc = {v: {"zlib": True, "complevel": 4} for v in ("cf", "G", "cap_cell")}
-        out_path = args.out / f"cf_{args.region}_{run}.nc"
+        out_path = args.out / f"cf_{args.region}_{tag}.nc"
         tmp = out_path.with_suffix(".nc.tmp")
         out.to_netcdf(tmp, format="NETCDF4", engine="netcdf4", encoding=enc)
         tmp.replace(out_path)

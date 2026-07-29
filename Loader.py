@@ -166,9 +166,9 @@ class CellDataset(Dataset):
 
 # --------------------------------------------------------------------------- #
 def loader_prepare(dataset_nc, farms_csv, specs_csv, run_tag, batch_size=64,
-                   num_workers_train=4, num_workers_eval=2):
+                   num_workers_train=4, num_workers_eval=2, use_cf_lam=True):
     ds = xr.open_dataset(dataset_nc)
-    feat_names = list(WIND_VARS) + (["cf_lam"] if "cf_lam" in ds else [])
+    feat_names = list(WIND_VARS) + (["cf_lam"] if use_cf_lam and "cf_lam" in ds else [])
     N, L, C = ds.sizes["init"], ds.sizes["lead_time"], ds.sizes["cell"]
     inputs = np.stack([ds[v].values for v in feat_names], axis=-1).astype(np.float32)  # (N,L,C,Fdyn)
     cf_obs = ds["cf_obs"].values.astype(np.float32)          # (N, L, C)
@@ -206,16 +206,19 @@ def loader_prepare(dataset_nc, farms_csv, specs_csv, run_tag, batch_size=64,
 # --------------------------------------------------------------------------- #
 # inference: the full standardised grid for a dataset, using the SAVED train stats
 # --------------------------------------------------------------------------- #
-def inference_features(dataset_nc, farms_csv, specs_csv, run_tag):
+def inference_features(dataset_nc, farms_csv, specs_csv, run_tag, use_cf_lam=True):
     """Standardised model input (N, L, C, input_dim) for a whole dataset.
 
     Same feature construction as loader_prepare (WIND_VARS [+cf_lam] + 3 static, ws & static
     standardised) but with the stats LOADED from artifacts/<run_tag>/ rather than refit, and
     returned as the full gridded array + coords + geometry so infer_cf.py can run the model and
     aggregate. This is the single source of feature parity between training and inference.
+
+    use_cf_lam=False drops the cf_lam channel even when the dataset has it (the wind-only variant),
+    so the SAME dataset trains/scores both tiers -- must match how run_tag was trained.
     """
     ds = xr.open_dataset(dataset_nc)
-    feat_names = list(WIND_VARS) + (["cf_lam"] if "cf_lam" in ds else [])
+    feat_names = list(WIND_VARS) + (["cf_lam"] if use_cf_lam and "cf_lam" in ds else [])
     inputs = np.stack([ds[v].values for v in feat_names], axis=-1).astype(np.float32)  # (N,L,C,Fd)
 
     farms_df = pd.read_csv(farms_csv)

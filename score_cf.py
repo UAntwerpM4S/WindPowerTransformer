@@ -33,15 +33,30 @@ WPOWER_DIR = Path("/mnt/weatherloss/WindPower/data/WPDistr")
 CELLS_DIR  = Path("/mnt/weatherloss/WindPowerTransformer/data/cells")            # dataset_BE_<RUN>.nc
 TRANSFORMER_DIR = Path("/mnt/weatherloss/WindPowerTransformer/data/cf_forecasts")  # cf_BE_<RUN>.nc
 
-RUNS   = ["HighCapacityGT", "VanillaPowerGT", "VeryHighCapacityGT"]
+# LAM runs whose dataset_BE_<run>.nc supplies obs + direct (cf_lam) + power curve (ws100).
+# RegularWeather has no cf_lam -> it contributes a power curve + a wind-only transformer only.
+SOURCE_RUNS = ["HighCapacityGT", "VanillaPowerGT", "VeryHighCapacityGT", "RegularWeather"]
+
+# transformer forecasts to score: (cf file tag, source LAM run, method name in the plot).
+# 'transformer' = wind + cf_lam ; 'transformer_wo' = wind-only (dash-dot vs dotted).
+TRANSFORMERS = [
+    ("HighCapacityGT",        "HighCapacityGT",     "transformer"),
+    ("VanillaPowerGT",        "VanillaPowerGT",     "transformer"),
+    ("VeryHighCapacityGT",    "VeryHighCapacityGT", "transformer"),
+    ("HighCapacityGT_wo",     "HighCapacityGT",     "transformer_wo"),
+    ("VanillaPowerGT_wo",     "VanillaPowerGT",     "transformer_wo"),
+    ("VeryHighCapacityGT_wo", "VeryHighCapacityGT", "transformer_wo"),
+    ("RegularWeather",        "RegularWeather",     "transformer_wo"),
+]
 REGION = "BE"
 SPLIT  = "test"                      # which split to report on
 OUT_DIR = Path("cf_scores")
 # --------------------------------------------------
 
 FLEET_RE = re.compile(r"\s*(\d+)\s*x\s*(.+?)\s*$")
-METHOD_LABEL = {"direct": "direct", "curve": "power curve", "transformer": "transformer"}
-STYLE = {"direct": "-", "curve": "--", "transformer": "-."}
+METHOD_LABEL = {"direct": "direct", "curve": "power curve",
+                "transformer": "transformer (wind+cf_lam)", "transformer_wo": "transformer (wind-only)"}
+STYLE = {"direct": "-", "curve": "--", "transformer": "-.", "transformer_wo": ":"}
 
 
 # =============================================================================
@@ -93,7 +108,7 @@ def farm_power_curve(ws100, G, curves, farms):
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--runs", nargs="+", default=RUNS)
+    ap.add_argument("--source-runs", nargs="+", default=SOURCE_RUNS)
     ap.add_argument("--region", default=REGION)
     ap.add_argument("--split", default=SPLIT)
     ap.add_argument("--cells-dir", type=Path, default=CELLS_DIR)
@@ -107,18 +122,19 @@ def main() -> None:
     specs = pd.read_csv(args.wpower_dir / "turbine_specs.csv")
     specs = specs.rename(columns={specs.columns[0]: "turbine_type"}).set_index("turbine_type")
 
-    # ---- gather per-run per-method per-farm power on the reported split ----
+    # ---- per source run: dataset gives obs + direct(cf_lam) + power curve; store for transformers ----
     farms = leads = cap_np = None
     total_cap = 0.0
     curves = None
-    # method_pred[(run, method)] = (P_pred (N,L,F), obs (N,L,F), test-mask (N,))
+    # method_pred[(source_run, method)] = (P_pred (N,L,F), obs (N,L,F), test-mask (N,))
     method_pred = {}
+    runs_data = {}          # source_run -> dict(G, obs, test, init)
     present_runs = []
 
-    for run in args.runs:
+    for run in args.source_runs:
         dpath = args.cells_dir / f"dataset_{args.region}_{run}.nc"
         if not dpath.exists():
-            print(f"{run:18s} {dpath} missing -- skipping")
+            print(f"{run:22s} {dpath} missing -- skipping")
             continue
         ds = xr.open_dataset(dpath)
         f_run = [str(f) for f in ds["farm"].values]
@@ -133,38 +149,40 @@ def main() -> None:
 
         G = ds["G"].values
         obs = ds["power_obs"].values.astype(np.float64)                # (N,L,F)
-        split = ds["split"].values.astype(str)
-        test = split == args.split
+        test = ds["split"].values.astype(str) == args.split
         init = pd.DatetimeIndex(ds["init"].values)
+        runs_data[run] = dict(G=G, obs=obs, test=test, init=init)
+        present_runs.append(run)
 
         if "cf_lam" in ds:
-            method_pred[(run, "direct")] = (
-                np.einsum("nlc,fc->nlf", ds["cf_lam"].values, G), obs, test)
-        method_pred[(run, "curve")] = (
-            farm_power_curve(ds["ws100"].values, G, curves, farms), obs, test)
-
-        tfp = args.transformer_dir / f"cf_{args.region}_{run}.nc"
-        if tfp.exists():
-            with xr.open_dataset(tfp) as tf:
-                tf_init = pd.DatetimeIndex(tf["init"].values)
-                cf_tf = tf["cf"].values.astype(np.float64)
-            row = {t: i for i, t in enumerate(tf_init)}
-            rows = np.array([row.get(t, -1) for t in init])
-            cf_al = np.full_like(ds["cf_lam"].values if "cf_lam" in ds
-                                 else np.empty((len(init),) + cf_tf.shape[1:]), np.nan,
-                                 dtype=np.float64)
-            ok = rows >= 0
-            cf_al[ok] = cf_tf[rows[ok]]
-            method_pred[(run, "transformer")] = (np.einsum("nlc,fc->nlf", cf_al, G), obs, test)
-        else:
-            print(f"{run:18s} no cf_{args.region}_{run}.nc -- run infer_cf.py; transformer skipped")
-
+            method_pred[(run, "direct")] = (np.einsum("nlc,fc->nlf", ds["cf_lam"].values, G),
+                                            obs, test)
+        method_pred[(run, "curve")] = (farm_power_curve(ds["ws100"].values, G, curves, farms),
+                                        obs, test)
         n_te = int(test.sum())
-        print(f"{run:18s} {len(init):5d} inits, {n_te} in '{args.split}'  "
+        print(f"{run:22s} {len(init):5d} inits, {n_te} in '{args.split}'  "
               f"({init[test].min():%Y-%m-%d}..{init[test].max():%Y-%m-%d})" if n_te else
-              f"{run:18s} {len(init):5d} inits, 0 in '{args.split}'")
-        present_runs.append(run)
+              f"{run:22s} {len(init):5d} inits, 0 in '{args.split}'")
         ds.close()
+
+    # ---- transformers: reconstruct each cf_<tag>.nc and attach to its source run's obs/test ----
+    for tag, run, method in TRANSFORMERS:
+        if run not in runs_data:
+            continue
+        tfp = args.transformer_dir / f"cf_{args.region}_{tag}.nc"
+        if not tfp.exists():
+            print(f"{tag:22s} no cf_{args.region}_{tag}.nc -- run infer_cf.py; skipped")
+            continue
+        d = runs_data[run]
+        with xr.open_dataset(tfp) as tf:
+            tf_init = pd.DatetimeIndex(tf["init"].values)
+            cf_tf = tf["cf"].values.astype(np.float64)
+        row = {t: i for i, t in enumerate(tf_init)}
+        rows = np.array([row.get(t, -1) for t in d["init"]])
+        cf_al = np.full((len(d["init"]),) + cf_tf.shape[1:], np.nan, dtype=np.float64)
+        ok = rows >= 0
+        cf_al[ok] = cf_tf[rows[ok]]
+        method_pred[(run, method)] = (np.einsum("nlc,fc->nlf", cf_al, d["G"]), d["obs"], d["test"])
 
     if not method_pred:
         raise SystemExit("nothing to score -- no dataset_*.nc found")

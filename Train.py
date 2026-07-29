@@ -66,6 +66,7 @@ def main():
         specs_csv=args.specs_csv,
         run_tag=args.run_tag,
         batch_size=args.batch_size,
+        use_cf_lam=not args.no_cf_lam,
     )
     print(f"input_dim (auto from dataset): {input_dim}")
 
