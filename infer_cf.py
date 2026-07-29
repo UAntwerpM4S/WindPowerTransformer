@@ -137,12 +137,13 @@ def main():
                 print(f"  fold {f}: {int(m.sum())} inits <- {name}")
             cf = oof
             split_coord = np.array(["test"] * len(feats["init"]), dtype=object)  # all OOF
+            ckpt_desc = f"{tag}_f0..f{args.kfold - 1} (OOF)"
         else:
             feats = inference_features(dataset, farms_csv, specs_csv, run_tag=tag,
                                        use_cf_lam=use_cf_lam)
-            cf, name = load_and_predict(args.ckpt_dir, tag, feats, args, device)
+            cf, ckpt_desc = load_and_predict(args.ckpt_dir, tag, feats, args, device)
             split_coord = feats["split"]
-            print(f"  {name}  | input_dim {feats['X'].shape[-1]} "
+            print(f"  {ckpt_desc}  | input_dim {feats['X'].shape[-1]} "
                   f"({', '.join(feats['feat_names'])})")
         C = cf.shape[2]
 
@@ -158,7 +159,7 @@ def main():
                     "cell_lat": ("cell", feats["cell_lat"]),
                     "cell_lon": ("cell", feats["cell_lon"])},
             attrs={"tag": tag, "source_run": source_run, "use_cf_lam": int(use_cf_lam),
-                   "region": args.region, "checkpoint": os.path.basename(ckpt),
+                   "region": args.region, "checkpoint": ckpt_desc,
                    "inputs": ", ".join(feats["feat_names"]),
                    "reconstruction": "P(farm,t) = sum_cell G[farm,cell]*cf(cell,t)"})
         out["lead_time"].attrs["units"] = "h"
