@@ -225,8 +225,10 @@ def main() -> None:
               f"({common.min():%Y-%m-%d}..{common.max():%Y-%m-%d})" if len(common) else
               f"\ncommon inits across {len(present_runs)} runs: 0  <-- runs share no inits!")
     if season_months is not None:
-        print(f"season {args.season}: {sum(int(m.sum()) for m in eff_mask.values())} "
-              f"init-scores kept across runs")
+        scored = set()
+        for r in present_runs:
+            scored |= set(runs_data[r]["init"][eff_mask[r]])
+        print(f"season {args.season}: {len(scored)} distinct inits scored")
 
     F, L = len(farms), len(leads)
     series = [k for k in method_pred]
