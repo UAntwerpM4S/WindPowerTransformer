@@ -120,6 +120,20 @@ def ensure_stats(inputs, feat_names, static, static_names, split, run_tag):
     return stats
 
 
+def apply_stats(inputs, feat_names, static, static_names, stats):
+    """Standardise ws + static with the given (train-fit) stats. Used by BOTH training and
+    inference so the feature scaling is identical. inputs standardised in place; static copied."""
+    for v in STANDARDIZE:
+        if v in feat_names:
+            j = feat_names.index(v)
+            inputs[:, :, :, j] = (inputs[:, :, :, j] - stats[v]["mean"]) / stats[v]["std"]
+    static = static.copy()
+    for j, v in enumerate(static_names):
+        static[:, j] = (np.nan_to_num(static[:, j], nan=stats[v]["mean"])
+                        - stats[v]["mean"]) / stats[v]["std"]
+    return inputs, static
+
+
 # --------------------------------------------------------------------------- #
 # dataset
 # --------------------------------------------------------------------------- #
@@ -176,15 +190,7 @@ def loader_prepare(dataset_nc, farms_csv, specs_csv, run_tag, batch_size=64,
         print(f"  {nm}: {(split == nm).sum()} inits")
 
     stats = ensure_stats(inputs, feat_names, static, static_names, split, run_tag)
-
-    # standardise dynamic ws + static in place
-    for v in STANDARDIZE:
-        if v in feat_names:
-            j = feat_names.index(v)
-            inputs[:, :, :, j] = (inputs[:, :, :, j] - stats[v]["mean"]) / stats[v]["std"]
-    for j, v in enumerate(static_names):
-        static[:, j] = (np.nan_to_num(static[:, j], nan=stats[v]["mean"])
-                        - stats[v]["mean"]) / stats[v]["std"]
+    inputs, static = apply_stats(inputs, feat_names, static, static_names, stats)
 
     def make(which):
         return CellDataset(inputs, cf_obs, static, feat_names, static_names, split, which, stats)
@@ -195,3 +201,52 @@ def loader_prepare(dataset_nc, farms_csv, specs_csv, run_tag, batch_size=64,
     input_dim = inputs.shape[-1] + static.shape[1]
     return (dl(tr, True, num_workers_train), dl(va, False, num_workers_eval),
             dl(te, False, num_workers_eval), geom, input_dim)
+
+
+# --------------------------------------------------------------------------- #
+# inference: the full standardised grid for a dataset, using the SAVED train stats
+# --------------------------------------------------------------------------- #
+def inference_features(dataset_nc, farms_csv, specs_csv, run_tag):
+    """Standardised model input (N, L, C, input_dim) for a whole dataset.
+
+    Same feature construction as loader_prepare (WIND_VARS [+cf_lam] + 3 static, ws & static
+    standardised) but with the stats LOADED from artifacts/<run_tag>/ rather than refit, and
+    returned as the full gridded array + coords + geometry so infer_cf.py can run the model and
+    aggregate. This is the single source of feature parity between training and inference.
+    """
+    ds = xr.open_dataset(dataset_nc)
+    feat_names = list(WIND_VARS) + (["cf_lam"] if "cf_lam" in ds else [])
+    inputs = np.stack([ds[v].values for v in feat_names], axis=-1).astype(np.float32)  # (N,L,C,Fd)
+
+    farms_df = pd.read_csv(farms_csv)
+    specs = pd.read_csv(specs_csv)
+    specs = specs.rename(columns={specs.columns[0]: "turbine_type"}).set_index("turbine_type")
+    static, static_names = cell_static(ds, farms_df, specs)
+
+    path = os.path.join("artifacts", str(run_tag), "cell_feature_stats.pkl")
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"missing train stats {path} -- train run_tag={run_tag} first")
+    with open(path, "rb") as f:
+        stats = pickle.load(f)
+    inputs, static = apply_stats(inputs, feat_names, static, static_names, stats)
+
+    N, L, C = inputs.shape[:3]
+    stat_b = np.broadcast_to(static[None, None], (N, L, C, static.shape[1]))
+    X = np.concatenate([inputs, stat_b], axis=-1).astype(np.float32)         # (N,L,C,input_dim)
+    for i in range(N):                                                       # gap-fill per series
+        for c in range(C):
+            if not np.isfinite(X[i, :, c, :]).all():
+                X[i, :, c, :] = _interp2d(X[i, :, c, :])
+
+    out = dict(
+        X=X, feat_names=feat_names + static_names,
+        split=ds["split"].values.astype(str),
+        init=pd.DatetimeIndex(ds["init"].values),
+        leads=np.asarray(ds["lead_time"].values, dtype=int),
+        valid=ds["valid_time"].values,
+        farms=[str(f) for f in ds["farm"].values],
+        G=ds["G"].values, cap_cell=ds["cap_cell"].values,
+        cell_lat=ds["cell_lat"].values, cell_lon=ds["cell_lon"].values,
+    )
+    ds.close()
+    return out

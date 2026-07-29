@@ -82,27 +82,50 @@ def month_in(idx: pd.DatetimeIndex, lo: tuple[int, int], hi: tuple[int, int]) ->
     return (ym >= lo[0] * 12 + lo[1]) & (ym <= hi[0] * 12 + hi[1])
 
 
-def assign_split(inits: pd.DatetimeIndex, train, val, test, gap_hours: int) -> np.ndarray:
-    """Label each init train/val/test/unused, then drop inits that straddle a boundary.
+def drop_boundary(inits: pd.DatetimeIndex, split: np.ndarray, gap_hours: int) -> np.ndarray:
+    """Drop inits that straddle a split boundary.
 
-    An init is dropped if its forecast window [init, init + gap] reaches into a different
-    split's window, which would leak valid times across the boundary.
+    An init is dropped if any other init within +/- gap hours (i.e. whose 36 h forecast window
+    overlaps this one's) belongs to a different split, which would leak valid times across it.
     """
-    split = np.full(len(inits), "unused", dtype=object)
-    for name, rng in (("train", train), ("val", val), ("test", test)):
-        split[month_in(inits, *rng)] = name
-
     gap = pd.Timedelta(hours=gap_hours)
     keep = np.ones(len(inits), dtype=bool)
     for i, (t0, s) in enumerate(zip(inits, split)):
         if s == "unused":
             continue
-        # any init whose own forecast window overlaps this one, but in another split
         near = (inits > t0 - gap) & (inits < t0 + gap)
         if (split[near] != s).any():
             keep[i] = False
+    split = split.copy()
     split[~keep] = "unused"
     return split
+
+
+def assign_split(inits: pd.DatetimeIndex, train, val, test, gap_hours: int) -> np.ndarray:
+    """Label each init train/val/test by INIT month, then drop boundary-straddling inits."""
+    split = np.full(len(inits), "unused", dtype=object)
+    for name, rng in (("train", train), ("val", val), ("test", test)):
+        split[month_in(inits, *rng)] = name
+    return drop_boundary(inits, split, gap_hours)
+
+
+def assign_split_frac(inits: pd.DatetimeIndex, fracs, gap_hours: int) -> np.ndarray:
+    """Chronological fractional split: first f_train of the inits -> train, next f_val -> val,
+    last f_test -> test (contiguous in time), then drop boundary-straddling inits.
+
+    Robust to whatever period the forecast dirs actually cover -- no calendar assumptions. The
+    two boundaries (train|val, val|test) are the only places the gap guard bites, so the reported
+    test block is cleanly out-of-sample from training.
+    """
+    n = len(inits)
+    ftr, fva, _ = fracs
+    n_tr, n_va = int(round(ftr * n)), int(round(fva * n))
+    ranks = np.empty(n, dtype=int)
+    ranks[np.argsort(inits.values, kind="stable")] = np.arange(n)     # time order -> rank
+    split = np.full(n, "test", dtype=object)
+    split[ranks < n_tr] = "train"
+    split[(ranks >= n_tr) & (ranks < n_tr + n_va)] = "val"
+    return drop_boundary(inits, split, gap_hours)
 
 
 def build_one(cells_path: Path, obs: pd.DataFrame, args) -> None:
@@ -166,8 +189,11 @@ def build_one(cells_path: Path, obs: pd.DataFrame, args) -> None:
 
     # ---- split ----
     inits = pd.DatetimeIndex(ds["init"].values)
-    split = assign_split(inits, args.train_months, args.val_months, args.test_months,
-                         args.gap_hours)
+    if args.split_frac is not None:
+        split = assign_split_frac(inits, args.split_frac, args.gap_hours)
+    else:
+        split = assign_split(inits, args.train_months, args.val_months, args.test_months,
+                             args.gap_hours)
     for name in ("train", "val", "test", "unused"):
         m = split == name
         if m.any():
@@ -189,12 +215,14 @@ def build_one(cells_path: Path, obs: pd.DataFrame, args) -> None:
         "note": "NaN if any farm contributing to the cell is NaN at that valid time",
     }
     out["power_obs"].attrs = {"units": "MW", "long_name": "observed farm power at the valid time"}
-    out["split"].attrs = {"long_name": "train/val/test by init month, boundary inits dropped",
+    out["split"].attrs = {"long_name": "train/val/test, boundary inits dropped",
                           "gap_hours": args.gap_hours}
     out.attrs["obs_shift_hours"] = args.obs_shift_hours
     out.attrs["target"] = ("cf_obs(c,t) = sum_f P_obs(f,t) * G[f,c]/sum_c G[f,c] / cap_cell(c); "
                           "a cell is NaN if any contributing farm is NaN")
-    out.attrs["splits"] = (f"train {args.train_months} | val {args.val_months} | "
+    out.attrs["splits"] = (f"chronological fractions {args.split_frac} | gap {args.gap_hours} h"
+                           if args.split_frac is not None else
+                           f"train {args.train_months} | val {args.val_months} | "
                            f"test {args.test_months} | gap {args.gap_hours} h")
 
     enc_vars = list(WIND_VARS) + ["cf_obs", "power_obs", "G", "cap_cell"]
@@ -226,7 +254,11 @@ def main() -> None:
     ap.add_argument("--train-months", type=int, nargs=4, default=None, metavar=("Y1", "M1", "Y2", "M2"))
     ap.add_argument("--val-months", type=int, nargs=4, default=None, metavar=("Y1", "M1", "Y2", "M2"))
     ap.add_argument("--test-months", type=int, nargs=4, default=None, metavar=("Y1", "M1", "Y2", "M2"))
+    ap.add_argument("--split-frac", type=float, nargs=3, default=None, metavar=("TRAIN", "VAL", "TEST"),
+                    help="chronological fractional split (e.g. 0.6 0.2 0.2); overrides --*-months")
     args = ap.parse_args()
+    if args.split_frac is not None and abs(sum(args.split_frac) - 1.0) > 1e-6:
+        raise SystemExit(f"--split-frac must sum to 1, got {args.split_frac}")
 
     pair = lambda v, d: ((v[0], v[1]), (v[2], v[3])) if v else d          # noqa: E731
     args.train_months = pair(args.train_months, TRAIN_MONTHS)
