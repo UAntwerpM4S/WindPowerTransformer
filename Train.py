@@ -67,6 +67,8 @@ def main():
         run_tag=args.run_tag,
         batch_size=args.batch_size,
         use_cf_lam=not args.no_cf_lam,
+        n_folds=args.n_folds,
+        test_fold=args.test_fold,
     )
     print(f"input_dim (auto from dataset): {input_dim}")
 

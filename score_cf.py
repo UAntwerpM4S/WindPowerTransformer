@@ -110,7 +110,10 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--source-runs", nargs="+", default=SOURCE_RUNS)
     ap.add_argument("--region", default=REGION)
-    ap.add_argument("--split", default=SPLIT)
+    ap.add_argument("--split", default=SPLIT, help="test | all (all = every init, e.g. k-fold OOF)")
+    ap.add_argument("--per-run-inits", action="store_true",
+                    help="score each run on its OWN inits (default: intersect to common inits so "
+                         "the cross-run comparison is on one identical sample)")
     ap.add_argument("--cells-dir", type=Path, default=CELLS_DIR)
     ap.add_argument("--transformer-dir", type=Path, default=TRANSFORMER_DIR)
     ap.add_argument("--wpower-dir", type=Path, default=WPOWER_DIR)
@@ -149,7 +152,8 @@ def main() -> None:
 
         G = ds["G"].values
         obs = ds["power_obs"].values.astype(np.float64)                # (N,L,F)
-        test = ds["split"].values.astype(str) == args.split
+        test = (np.ones(ds.sizes["init"], bool) if args.split == "all"
+                else ds["split"].values.astype(str) == args.split)
         init = pd.DatetimeIndex(ds["init"].values)
         runs_data[run] = dict(G=G, obs=obs, test=test, init=init)
         present_runs.append(run)
@@ -187,6 +191,17 @@ def main() -> None:
     if not method_pred:
         raise SystemExit("nothing to score -- no dataset_*.nc found")
 
+    # ---- one identical sample across runs: intersect the scored inits (default) ----
+    if args.per_run_inits:
+        eff_mask = {r: runs_data[r]["test"] for r in present_runs}
+    else:
+        sets = [set(runs_data[r]["init"][runs_data[r]["test"]]) for r in present_runs]
+        common = pd.DatetimeIndex(sorted(set.intersection(*sets))) if sets else pd.DatetimeIndex([])
+        eff_mask = {r: runs_data[r]["init"].isin(common) for r in present_runs}
+        print(f"\ncommon inits across {len(present_runs)} runs: {len(common)} "
+              f"({common.min():%Y-%m-%d}..{common.max():%Y-%m-%d})" if len(common) else
+              f"\ncommon inits across {len(present_runs)} runs: 0  <-- runs share no inits!")
+
     F, L = len(farms), len(leads)
     series = [k for k in method_pred]
 
@@ -213,8 +228,8 @@ def main() -> None:
             sp_t[s][k] += pt;   so_t[s][k] += ot
             spp_t[s][k] += pt * pt; soo_t[s][k] += ot * ot; spo_t[s][k] += pt * ot
 
-    for s, (P, obs, test) in method_pred.items():
-        for nidx in np.where(test)[0]:
+    for s, (P, obs, _test) in method_pred.items():
+        for nidx in np.where(eff_mask[s[0]])[0]:
             for k in range(L):
                 accumulate(s, P[nidx, k], obs[nidx, k], k)
 

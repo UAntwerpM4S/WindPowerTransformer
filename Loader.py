@@ -165,14 +165,53 @@ class CellDataset(Dataset):
 
 
 # --------------------------------------------------------------------------- #
+# k-fold: derive a train/val/test split from the init timestamps at load time
+# --------------------------------------------------------------------------- #
+def kfold_assign(inits, n_folds):
+    """Fold index 0..n_folds-1 per init, as contiguous chronological blocks."""
+    n = len(inits)
+    ranks = np.empty(n, dtype=int)
+    ranks[np.argsort(np.asarray(inits.values), kind="stable")] = np.arange(n)
+    return (ranks * n_folds // n).astype(int)
+
+
+def kfold_split(inits, n_folds, test_fold, gap_hours=36, val_frac=0.15, seed=0):
+    """One CV fold as a train/val/test split.
+
+    test  = the whole of block `test_fold`;
+    train = the other blocks MINUS a gap_hours band around the test block (no valid-time leak);
+    val   = a fixed random val_frac of the remaining train, for early stopping.
+    Every init is in exactly one fold's test, so looping test_fold=0..K-1 gives full OOF coverage.
+    """
+    fold = kfold_assign(inits, n_folds)
+    split = np.where(fold == test_fold, "test", "train").astype(object)
+    test_times = inits[fold == test_fold]
+    if len(test_times):
+        gap = pd.Timedelta(hours=gap_hours)
+        near = np.asarray((inits > test_times.min() - gap) & (inits < test_times.max() + gap))
+        split[(split == "train") & near] = "unused"
+    tr = np.where(split == "train")[0]
+    if len(tr):
+        n_val = int(round(val_frac * len(tr)))
+        if n_val:
+            split[np.random.default_rng(seed + test_fold).choice(tr, n_val, replace=False)] = "val"
+    return split
+
+
+# --------------------------------------------------------------------------- #
 def loader_prepare(dataset_nc, farms_csv, specs_csv, run_tag, batch_size=64,
-                   num_workers_train=4, num_workers_eval=2, use_cf_lam=True):
+                   num_workers_train=4, num_workers_eval=2, use_cf_lam=True,
+                   n_folds=None, test_fold=None, gap_hours=36):
     ds = xr.open_dataset(dataset_nc)
     feat_names = list(WIND_VARS) + (["cf_lam"] if use_cf_lam and "cf_lam" in ds else [])
     N, L, C = ds.sizes["init"], ds.sizes["lead_time"], ds.sizes["cell"]
     inputs = np.stack([ds[v].values for v in feat_names], axis=-1).astype(np.float32)  # (N,L,C,Fdyn)
     cf_obs = ds["cf_obs"].values.astype(np.float32)          # (N, L, C)
-    split = ds["split"].values.astype(str)                   # (N,)
+    if n_folds is not None:                                   # k-fold: split from init timestamps
+        split = kfold_split(pd.DatetimeIndex(ds["init"].values), n_folds, test_fold, gap_hours)
+        split = split.astype(str)
+    else:
+        split = ds["split"].values.astype(str)               # (N,)
 
     farms_df = pd.read_csv(farms_csv)
     specs = pd.read_csv(specs_csv)

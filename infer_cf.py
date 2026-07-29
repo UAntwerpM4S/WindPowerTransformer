@@ -29,7 +29,7 @@ import xarray as xr
 import torch
 
 from Transformer import TemporalTransformer
-from Loader import inference_features
+from Loader import inference_features, kfold_assign
 
 # -------------------- SETTINGS --------------------
 WPOWER_DIR = Path("/mnt/weatherloss/WindPower/data/WPDistr")
@@ -81,6 +81,17 @@ def predict_cf(model, X, device, batch=8192):
     return np.clip(out.reshape(N, C, L).transpose(0, 2, 1), 0.0, 1.0)
 
 
+def load_and_predict(ckpt_dir, tag, feats, args, device):
+    """Find the checkpoint for run_tag=tag, load it, predict CF for feats['X']."""
+    input_dim = feats["X"].shape[-1]
+    ckpt = find_ckpt(ckpt_dir, tag, input_dim)
+    model = TemporalTransformer(input_dim=input_dim, model_dim=args.model_dim,
+                                n_heads=args.n_heads, num_layers=args.num_layers,
+                                mlp_mult=args.mlp_mult).to(device)
+    model.load_state_dict(torch.load(ckpt, map_location=device))
+    return predict_cf(model, feats["X"], device), os.path.basename(ckpt)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -93,6 +104,8 @@ def main():
     ap.add_argument("--n_heads", type=int, default=N_HEADS)
     ap.add_argument("--num_layers", type=int, default=NUM_LAYERS)
     ap.add_argument("--mlp_mult", type=int, default=MLP_MULT)
+    ap.add_argument("--kfold", type=int, default=0,
+                    help="assemble out-of-fold predictions from K per-fold models <tag>_f0..f{K-1}")
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
 
@@ -105,26 +118,37 @@ def main():
         if not dataset.exists():
             print(f"\n{tag}: {dataset} missing -- run the builder first, skipping")
             continue
-        print(f"\n{'='*70}\n{tag}  (source {source_run}, cf_lam={use_cf_lam})\n{'='*70}")
+        print(f"\n{'='*70}\n{tag}  (source {source_run}, cf_lam={use_cf_lam}"
+              f"{f', {args.kfold}-fold OOF' if args.kfold else ''})\n{'='*70}")
 
-        feats = inference_features(dataset, farms_csv, specs_csv, run_tag=tag, use_cf_lam=use_cf_lam)
-        X = feats["X"]
-        input_dim = X.shape[-1]
-        ckpt = find_ckpt(args.ckpt_dir, tag, input_dim)
-
-        model = TemporalTransformer(input_dim=input_dim, model_dim=args.model_dim,
-                                    n_heads=args.n_heads, num_layers=args.num_layers,
-                                    mlp_mult=args.mlp_mult).to(device)
-        model.load_state_dict(torch.load(ckpt, map_location=device))
-        print(f"  {os.path.basename(ckpt)}  | input_dim {input_dim} "
-              f"({', '.join(feats['feat_names'])})")
-
-        cf = predict_cf(model, X, device)                                  # (N,L,C) in [0,1]
+        if args.kfold:
+            # assemble out-of-fold predictions: each fold model predicts only its own held-out fold
+            oof = fold = feats = None
+            for f in range(args.kfold):
+                ff = inference_features(dataset, farms_csv, specs_csv,
+                                        run_tag=f"{tag}_f{f}", use_cf_lam=use_cf_lam)
+                if oof is None:
+                    oof = np.full(ff["X"].shape[:3], np.nan, dtype=np.float32)
+                    fold = kfold_assign(ff["init"], args.kfold)
+                    feats = ff
+                cf_f, name = load_and_predict(args.ckpt_dir, f"{tag}_f{f}", ff, args, device)
+                m = fold == f
+                oof[m] = cf_f[m]
+                print(f"  fold {f}: {int(m.sum())} inits <- {name}")
+            cf = oof
+            split_coord = np.array(["test"] * len(feats["init"]), dtype=object)  # all OOF
+        else:
+            feats = inference_features(dataset, farms_csv, specs_csv, run_tag=tag,
+                                       use_cf_lam=use_cf_lam)
+            cf, name = load_and_predict(args.ckpt_dir, tag, feats, args, device)
+            split_coord = feats["split"]
+            print(f"  {name}  | input_dim {feats['X'].shape[-1]} "
+                  f"({', '.join(feats['feat_names'])})")
         C = cf.shape[2]
 
         out = xr.Dataset(
             {"cf":         (("init", "lead_time", "cell"), cf),
-             "split":      ("init", feats["split"]),
+             "split":      ("init", split_coord),
              "G":          (("farm", "cell"), feats["G"]),
              "cap_cell":   ("cell", feats["cap_cell"]),
              "valid_time": (("init", "lead_time"), feats["valid"])},
@@ -144,8 +168,8 @@ def main():
         out.to_netcdf(tmp, format="NETCDF4", engine="netcdf4", encoding=enc)
         tmp.replace(out_path)
 
-        te = feats["split"] == "test"
-        print(f"  wrote {out_path}  (cf mean {cf.mean():.4f} max {cf.max():.4f}; "
+        te = split_coord == "test"
+        print(f"  wrote {out_path}  (cf mean {np.nanmean(cf):.4f} max {np.nanmax(cf):.4f}; "
               f"{int(te.sum())} test inits)")
 
 

@@ -11,6 +11,10 @@ def get_args():
     # overfit within 2 epochs (train/val gap ~3.4x). dim64/2 layers + dropout generalises better.
     parser.add_argument("--no-cf-lam", dest="no_cf_lam", action="store_true",
                         help="drop the cf_lam channel (wind-only variant); input_dim 10 -> 9")
+    parser.add_argument("--n-folds", dest="n_folds", type=int, default=None,
+                        help="k-fold CV: split from init timestamps instead of the file's split")
+    parser.add_argument("--test-fold", dest="test_fold", type=int, default=None,
+                        help="which fold 0..n_folds-1 is held out as this model's test")
     parser.add_argument("--model_dim", type=int, default=64)
     parser.add_argument("--n_heads", type=int, default=4)
     parser.add_argument("--num_layers", type=int, default=2)
