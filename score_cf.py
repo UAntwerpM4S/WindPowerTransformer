@@ -54,6 +54,10 @@ OUT_DIR = Path("cf_scores")
 
 # which method families to score/plot (override on the CLI with --methods)
 METHODS = ["direct", "curve", "transformer", "transformer_wo"]
+
+# which season to restrict the scored inits to (by init month). "all" = no restriction.
+SEASON  = "all"
+SEASONS = {"all": None, "DJF": {12, 1, 2}, "MAM": {3, 4, 5}, "JJA": {6, 7, 8}, "SON": {9, 10, 11}}
 # --------------------------------------------------
 
 FLEET_RE = re.compile(r"\s*(\d+)\s*x\s*(.+?)\s*$")
@@ -120,6 +124,8 @@ def main() -> None:
     ap.add_argument("--methods", nargs="+", default=METHODS,
                     choices=["direct", "curve", "transformer", "transformer_wo"],
                     help="which method families to include (default: all four)")
+    ap.add_argument("--season", default=SEASON, choices=list(SEASONS),
+                    help="restrict scored inits to a season by init month (default: all)")
     ap.add_argument("--cells-dir", type=Path, default=CELLS_DIR)
     ap.add_argument("--transformer-dir", type=Path, default=TRANSFORMER_DIR)
     ap.add_argument("--wpower-dir", type=Path, default=WPOWER_DIR)
@@ -127,7 +133,10 @@ def main() -> None:
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     enabled = set(args.methods)
-    print(f"scoring methods: {', '.join(args.methods)}")
+    season_months = SEASONS[args.season]                      # None = all months
+    scope = args.split + ("" if season_months is None else f", {args.season}")
+    sfx = "" if season_months is None else f"_{args.season}"  # output-filename suffix
+    print(f"scoring methods: {', '.join(args.methods)} | season: {args.season}")
 
     farms_df = pd.read_csv(args.wpower_dir / "farms.csv")
     specs = pd.read_csv(args.wpower_dir / "turbine_specs.csv")
@@ -201,15 +210,23 @@ def main() -> None:
         raise SystemExit("nothing to score -- no dataset_*.nc found")
 
     # ---- one identical sample across runs: intersect the scored inits (default) ----
+    def in_season(run):
+        if season_months is None:
+            return np.ones(len(runs_data[run]["init"]), bool)
+        return np.isin(runs_data[run]["init"].month, list(season_months))
+
     if args.per_run_inits:
-        eff_mask = {r: runs_data[r]["test"] for r in present_runs}
+        eff_mask = {r: runs_data[r]["test"] & in_season(r) for r in present_runs}
     else:
         sets = [set(runs_data[r]["init"][runs_data[r]["test"]]) for r in present_runs]
         common = pd.DatetimeIndex(sorted(set.intersection(*sets))) if sets else pd.DatetimeIndex([])
-        eff_mask = {r: runs_data[r]["init"].isin(common) for r in present_runs}
+        eff_mask = {r: runs_data[r]["init"].isin(common) & in_season(r) for r in present_runs}
         print(f"\ncommon inits across {len(present_runs)} runs: {len(common)} "
               f"({common.min():%Y-%m-%d}..{common.max():%Y-%m-%d})" if len(common) else
               f"\ncommon inits across {len(present_runs)} runs: 0  <-- runs share no inits!")
+    if season_months is not None:
+        print(f"season {args.season}: {sum(int(m.sum()) for m in eff_mask.values())} "
+              f"init-scores kept across runs")
 
     F, L = len(farms), len(leads)
     series = [k for k in method_pred]
@@ -272,14 +289,14 @@ def main() -> None:
                     sd_p=sd_p, sd_o=sd_o, r=r, var_ratio=sd_p / sd_o if sd_o > 0 else np.nan)
 
     # ---- 1. total MAE by lead ----
-    print(f"\nTOTAL {args.region} power ({args.split}) — MAE as % of {total_cap:.0f} MW")
+    print(f"\nTOTAL {args.region} power ({scope}) — MAE as % of {total_cap:.0f} MW")
     hdr = "lead  " + "".join(f"{lbl(s):>28s}" for s in series)
     print(hdr); print("-" * len(hdr))
     for li, lh in enumerate(leads):
         print(f"+{lh:2d}h  " + "".join(f"{nmae_t[s][li]:27.2f}%" for s in series))
 
     # ---- 2. summary pooled over leads ----
-    print(f"\nSUMMARY — {args.region} total ({args.split}), pooled over leads")
+    print(f"\nSUMMARY — {args.region} total ({scope}), pooled over leads")
     print(f"{'series':36s} {'MAE%':>7s} {'RMSE MW':>9s} {'bias MW':>9s}")
     print("-" * 65)
     summary_rows = []
@@ -309,11 +326,11 @@ def main() -> None:
         ax.plot(leads, nmae_t[s], marker="o", ms=4, lw=1.8,
                 color=colors[s[0]], ls=STYLE[s[1]], label=lbl(s))
     ax.set(xlabel="lead time [h]", ylabel="MAE [% of total capacity]",
-           title=f"Total {args.region} power ({args.split}) — {F} farms, {total_cap:.0f} MW\n"
+           title=f"Total {args.region} power ({scope}) — {F} farms, {total_cap:.0f} MW\n"
                  f"solid = direct, dashed = power curve, dash-dot = transformer")
     ax.set_xticks(leads); ax.grid(ls="--", alpha=0.5); ax.legend(fontsize=8)
     fig.tight_layout()
-    p = args.out / f"mae_total_{args.region}.png"
+    p = args.out / f"mae_total_{args.region}{sfx}.png"
     fig.savefig(p, dpi=140); plt.close(fig); print(f"\nsaved {p}")
 
     ncol = 5 if F > 6 else 3
@@ -331,9 +348,9 @@ def main() -> None:
         axs[j // ncol][j % ncol].axis("off")
     axs[0][0].legend(fontsize=6)
     fig.supxlabel("lead time [h]"); fig.supylabel("MAE [% of farm capacity]")
-    fig.suptitle(f"Per-farm power MAE ({args.split}) — {args.region}")
+    fig.suptitle(f"Per-farm power MAE ({scope}) — {args.region}")
     fig.tight_layout()
-    p = args.out / f"mae_per_farm_{args.region}.png"
+    p = args.out / f"mae_per_farm_{args.region}{sfx}.png"
     fig.savefig(p, dpi=140); plt.close(fig); print(f"saved {p}")
 
     with np.errstate(invalid="ignore", divide="ignore"):
@@ -352,9 +369,9 @@ def main() -> None:
         axs[j // ncol][j % ncol].axis("off")
     axs[0][0].legend(fontsize=6)
     fig.supxlabel("lead time [h]"); fig.supylabel("bias [% of farm capacity]")
-    fig.suptitle(f"Per-farm power BIAS (forecast − observed) — {args.region} ({args.split})")
+    fig.suptitle(f"Per-farm power BIAS (forecast − observed) — {args.region} ({scope})")
     fig.tight_layout()
-    p = args.out / f"bias_per_farm_{args.region}.png"
+    p = args.out / f"bias_per_farm_{args.region}{sfx}.png"
     fig.savefig(p, dpi=140); plt.close(fig); print(f"saved {p}")
 
     dec_all = {s: decompose(s) for s in series}
@@ -380,10 +397,10 @@ def main() -> None:
             title="Variance ratio of the regional total\nbelow 1 = under-dispersive")
     axR.set_xticks(leads); axR.grid(ls="--", alpha=0.5); axR.legend(fontsize=7)
     fig.tight_layout()
-    p = args.out / f"decomposition_{args.region}.png"
+    p = args.out / f"decomposition_{args.region}{sfx}.png"
     fig.savefig(p, dpi=140); plt.close(fig); print(f"saved {p}")
 
-    print(f"\nMSE DECOMPOSITION — {args.region} total ({args.split}), pooled over leads")
+    print(f"\nMSE DECOMPOSITION — {args.region} total ({scope}), pooled over leads")
     print(f"{'series':36s} {'RMSE':>8s} {'bias²':>9s} {'ampl':>9s} {'phase':>9s} "
           f"{'σp/σo':>7s} {'r':>6s}")
     print("-" * 90)
@@ -405,11 +422,13 @@ def main() -> None:
                 rows.append(dict(run=s[0], method=s[1], lead_hours=int(lh), scope=farm,
                                  mae_mw=mae[s][i, li], nmae_pct=nmae[s][i, li],
                                  rmse_mw=rmse[s][i, li], bias_mw=bias[s][i, li], n=int(n[s][i, li])))
-    pd.DataFrame(rows).to_csv(args.out / f"scores_{args.region}.csv", index=False)
-    print(f"saved {args.out / f'scores_{args.region}.csv'}")
+    scores_csv = args.out / f"scores_{args.region}{sfx}.csv"
+    pd.DataFrame(rows).to_csv(scores_csv, index=False)
+    print(f"saved {scores_csv}")
     if summary_rows:
-        pd.DataFrame(summary_rows).to_csv(args.out / f"summary_{args.region}.csv", index=False)
-        print(f"saved {args.out / f'summary_{args.region}.csv'}")
+        summary_csv = args.out / f"summary_{args.region}{sfx}.csv"
+        pd.DataFrame(summary_rows).to_csv(summary_csv, index=False)
+        print(f"saved {summary_csv}")
 
 
 if __name__ == "__main__":
