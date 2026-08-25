@@ -4,13 +4,19 @@ import argparse
 def get_args():
     parser = argparse.ArgumentParser(description="Train the cell-level CERRA-truth PowerTransformer")
 
-    # Model — input_dim = 6 wind + 3 static cell features (capacity, turbinecount, rated_ws)
-    parser.add_argument("--input_dim", type=int, default=9, help="6 wind + 3 static cell features")
+    # input_dim is NOT a flag: Train.py infers it from the dataset (6 wind [+cf_lam] + 3 static)
+    # and names the checkpoint `...in<input_dim>...` so inference can only load a matching model.
 
     # Transformer architecture — smaller defaults: the wind->CF map is simple and a big model
     # overfit within 2 epochs (train/val gap ~3.4x). dim64/2 layers + dropout generalises better.
     parser.add_argument("--no-cf-lam", dest="no_cf_lam", action="store_true",
-                        help="drop the cf_lam channel (wind-only variant); input_dim 10 -> 9")
+                        help="drop the cf_lam channel (wind-only variant); input_dim 10 -> 9. "
+                             "No effect on a CERRA dataset, which has no cf_lam to begin with.")
+    # k-fold is for the FORECAST tier only, where the only data available to train the
+    # post-processor is the same year it must be scored on. The CERRA tier does not need it:
+    # CERRA runs from 2020, so it trains on 2020..2024-01 and is scored on 2024-08..2025-07 with
+    # a plain chronological separation. NOTE: the run_kfold.py driver was removed; the plumbing
+    # below (and infer_cf.py --kfold) still works if you drive the folds yourself.
     parser.add_argument("--n-folds", dest="n_folds", type=int, default=None,
                         help="k-fold CV: split from init timestamps instead of the file's split")
     parser.add_argument("--test-fold", dest="test_fold", type=int, default=None,

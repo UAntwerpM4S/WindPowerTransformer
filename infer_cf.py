@@ -1,12 +1,27 @@
 #!/usr/bin/env python3
-"""INFERENCE (forecast tier): apply each run's post-processor to its own dataset -> CF forecasts.
+"""INFERENCE: apply a trained cell-level post-processor to a dataset -> CF forecasts.
 
-ONE model per forecasting run. The forecast-tier post-processor conditions on the run's own
-`cf_lam` (the LAM's capacity-factor forecast) alongside the 6 wind vars + 3 static features, so it
-runs on the SAME dataset_BE_<RUN>.nc the model trained on (feature parity is exact -- both go
-through Loader.inference_features / apply_stats). It writes, per run:
+TWO WAYS TO USE THIS, both driven by the EXPERIMENTS table below, whose rows are
+(checkpoint tag, source dataset run, use_cf_lam) -- the tag and the dataset are DECOUPLED:
 
-    cf_BE_<RUN>.nc
+  FORECAST TIER (tag == source run).  One model per forecasting run, trained on that run's own
+  forecasts, conditioning on its `cf_lam` alongside the 6 wind vars + 3 static features. Answers
+  "can a post-processor improve THIS run's power forecast".
+
+  CERRA TIER (tag = CERRAcell, source run = each LAM run, use_cf_lam=False).  ONE converter,
+  fitted on CERRA ANALYSIS wind -> observed cf over the LAM's own training years (2020..2024-01),
+  applied UNCHANGED to every run's forecast wind. It has never seen a forecast, so it cannot
+  favour any run -- it is a calibrated replacement for the shared specs power curve, and the
+  differences it reports between runs are purely differences in the WIND. This is the
+  measuring-instrument use; see Runner.py for the chain that produces the checkpoint.
+
+  For the CERRA tier `use_cf_lam` MUST be False: the converter was trained on 6 wind + 3 static,
+  so feeding a 7th cf_lam channel would not match the checkpoint (guarded below).
+
+It writes, per row:
+
+    cf_BE_<tag>.nc                 when tag == source run
+    cf_BE_<tag>@<source run>.nc    when they differ (so CERRA rows do not overwrite each other)
       cf          (init, lead_time, cell)   predicted capacity factor in [0,1]   <- the product
       split       (init)                    train/val/test  (score_cf.py reports on 'test')
       G, cap_cell, cell_lat/lon, valid_time, farm
@@ -44,6 +59,12 @@ CKPT_DIR   = Path("checkpoints")
 #                that run's dataset, just dropping cf_lam)
 #   use_cf_lam = 6 wind + cf_lam + static (True) vs wind-only 6 wind + static (False)
 EXPERIMENTS = [
+    # --- CERRA tier: ONE converter (Runner.py) applied to every run's forecast wind ---------
+    ("CERRAcell",             "HighCapacityGT",     False),
+    ("CERRAcell",             "VanillaPowerGT",     False),
+    ("CERRAcell",             "VeryHighCapacityGT", False),
+    ("CERRAcell",             "RegularWeather",     False),
+    # --- forecast tier: one post-processor per run, trained on that run's own forecasts ------
     ("HighCapacityGT",        "HighCapacityGT",     True),
     ("VanillaPowerGT",        "VanillaPowerGT",     True),
     ("VeryHighCapacityGT",    "VeryHighCapacityGT", True),
@@ -82,14 +103,64 @@ def predict_cf(model, X, device, batch=8192):
 
 
 def load_and_predict(ckpt_dir, tag, feats, args, device):
-    """Find the checkpoint for run_tag=tag, load it, predict CF for feats['X']."""
+    """Find the checkpoint for run_tag=tag, load it, predict CF for feats['X'].
+
+    The checkpoint is validated against the feature count BEFORE use. find_ckpt falls back to any
+    *.pt when the `in<dim>` glob misses, which is fine within one tier but dangerous across tiers
+    (a 6-wind CERRA model must never silently receive a 7-channel forecast input), so the weight
+    shape is the authority, not the filename.
+    """
     input_dim = feats["X"].shape[-1]
     ckpt = find_ckpt(ckpt_dir, tag, input_dim)
+    state = torch.load(ckpt, map_location=device)
+    ckpt_dim = int(state["input_proj.weight"].shape[1])
+    if ckpt_dim != input_dim:
+        raise SystemExit(
+            f"input_dim mismatch: checkpoint {os.path.basename(ckpt)} expects {ckpt_dim} "
+            f"features, this dataset builds {input_dim} ({', '.join(feats['feat_names'])}).\n"
+            f"  A CERRA-tier converter is 6 wind + 3 static = 9; a forecast-tier model with "
+            f"cf_lam is 10. Set use_cf_lam=False for the CERRA rows in EXPERIMENTS.")
     model = TemporalTransformer(input_dim=input_dim, model_dim=args.model_dim,
                                 n_heads=args.n_heads, num_layers=args.num_layers,
                                 mlp_mult=args.mlp_mult).to(device)
-    model.load_state_dict(torch.load(ckpt, map_location=device))
+    model.load_state_dict(state)
     return predict_cf(model, feats["X"], device), os.path.basename(ckpt)
+
+
+def check_cells_match(ckpt_dir, tag, feats, strict=True):
+    """The checkpoint's training cells must be the SAME physical cells as this dataset's.
+
+    Only matters across tiers: the CERRA converter is trained on cells indexed into the full
+    72,668-cell CERRA grid, then applied to a forecast file whose grid is a SUBSET of it. The
+    cells themselves are the same 15 Belgian cells and each carries its own static features, so
+    ordering is not load-bearing -- but a genuine mismatch (a farm cell missing from the forecast
+    cutout, or a different region) would corrupt the farm aggregation silently. Train.py saves the
+    training geometry to artifacts/<tag>/cell_geom.npz; compare against it.
+    """
+    p = os.path.join("artifacts", str(tag), "cell_geom.npz")
+    if not os.path.exists(p):
+        print(f"  ! no {p} -- cannot verify cell geometry (train {tag} to write it)")
+        return
+    g = np.load(p, allow_pickle=True)
+    n_ck, n_ds = len(g["cell_lat"]), len(feats["cell_lat"])
+    if n_ck != n_ds:
+        msg = f"cell count differs: checkpoint {tag} trained on {n_ck}, dataset has {n_ds}"
+    else:
+        dlat = np.abs(g["cell_lat"] - feats["cell_lat"]).max()
+        dlon = np.abs(g["cell_lon"] - feats["cell_lon"]).max()
+        dcap = np.abs(g["cap_cell"] - feats["cap_cell"]).max()
+        if max(dlat, dlon) > 1e-3 or dcap > 1e-3:
+            msg = (f"cells differ: max |dlat|={dlat:.5f} |dlon|={dlon:.5f} deg, "
+                   f"|dcap|={dcap:.4f} MW")
+        else:
+            print(f"  cells verified: {n_ds} cells match the checkpoint "
+                  f"(max offset {max(dlat, dlon):.1e} deg)")
+            return
+    if strict:
+        raise SystemExit(f"CELL MISMATCH for {tag} on this dataset -- {msg}.\n"
+                         f"  Re-extract with the same region and turbine set, or pass "
+                         f"--no-strict-cells to score anyway.")
+    print(f"  ! CELL MISMATCH ({msg}) -- continuing because --no-strict-cells")
 
 
 def main():
@@ -104,6 +175,11 @@ def main():
     ap.add_argument("--n_heads", type=int, default=N_HEADS)
     ap.add_argument("--num_layers", type=int, default=NUM_LAYERS)
     ap.add_argument("--mlp_mult", type=int, default=MLP_MULT)
+    ap.add_argument("--no-strict-cells", dest="strict_cells", action="store_false",
+                    help="warn instead of aborting when the dataset's cells do not match the "
+                         "cells the checkpoint was trained on")
+    ap.add_argument("--only", nargs="+", default=None, metavar="TAG",
+                    help="run only these EXPERIMENTS tags (e.g. --only CERRAcell)")
     ap.add_argument("--kfold", type=int, default=0,
                     help="assemble out-of-fold predictions from K per-fold models <tag>_f0..f{K-1}")
     args = ap.parse_args()
@@ -113,7 +189,10 @@ def main():
     farms_csv = str(args.wpower_dir / "farms.csv")
     specs_csv = str(args.wpower_dir / "turbine_specs.csv")
 
-    for tag, source_run, use_cf_lam in EXPERIMENTS:
+    experiments = [e for e in EXPERIMENTS if not args.only or e[0] in args.only]
+    if not experiments:
+        raise SystemExit(f"--only {args.only} matched no EXPERIMENTS tag")
+    for tag, source_run, use_cf_lam in experiments:
         dataset = args.cells_dir / f"dataset_{args.region}_{source_run}.nc"
         if not dataset.exists():
             print(f"\n{tag}: {dataset} missing -- run the builder first, skipping")
@@ -145,6 +224,7 @@ def main():
             split_coord = feats["split"]
             print(f"  {ckpt_desc}  | input_dim {feats['X'].shape[-1]} "
                   f"({', '.join(feats['feat_names'])})")
+        check_cells_match(args.ckpt_dir, tag, feats, strict=args.strict_cells)
         C = cf.shape[2]
 
         out = xr.Dataset(
@@ -159,12 +239,14 @@ def main():
                     "cell_lat": ("cell", feats["cell_lat"]),
                     "cell_lon": ("cell", feats["cell_lon"])},
             attrs={"tag": tag, "source_run": source_run, "use_cf_lam": int(use_cf_lam),
+                   "tier": "cerra" if tag != source_run else "forecast",
                    "region": args.region, "checkpoint": ckpt_desc,
                    "inputs": ", ".join(feats["feat_names"]),
                    "reconstruction": "P(farm,t) = sum_cell G[farm,cell]*cf(cell,t)"})
         out["lead_time"].attrs["units"] = "h"
         enc = {v: {"zlib": True, "complevel": 4} for v in ("cf", "G", "cap_cell")}
-        out_path = args.out / f"cf_{args.region}_{tag}.nc"
+        stem = tag if tag == source_run else f"{tag}@{source_run}"
+        out_path = args.out / f"cf_{args.region}_{stem}.nc"
         tmp = out_path.with_suffix(".nc.tmp")
         out.to_netcdf(tmp, format="NETCDF4", engine="netcdf4", encoding=enc)
         tmp.replace(out_path)

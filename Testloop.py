@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+"""DEPRECATED -- per-farm era, superseded by infer_cf.py + score_cf.py. Do not use.
+
+Companion of the removed Loader_perfarm_OLD.py: it drives the old ONE-MODEL-PER-FARM design with
+its own INPUT_DIM/MODEL_DIM constants, which no longer match anything Train.py produces (the
+cell-level model infers input_dim from the dataset and records it in the checkpoint name).
+"""
 """
 Test CERRA-trained transformers on the real forecasts of one or more weather
 models.

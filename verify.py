@@ -1,4 +1,16 @@
 #!/usr/bin/env python3
+"""DEPRECATED -- per-farm era, superseded by score_cf.py. Do not use for new results.
+
+Kept only for reference. It is wrong for the current project in three ways:
+  * TOTAL_CAPACITY_MW = 2177.2 is the OLD, incorrect Belgian capacity. The verified figure is
+    2261.2 MW (see WindAI/data/WPDistr/README.md -- the misfiled Belwind Haliade, Seastar 30x8.4
+    not 20x8.4, and the C-Power SW/NE split). Anything scaled by it is off by ~4%.
+  * MODEL_NAMES lists a retired experiment set (VanillaPowerTF, WindHeavy*, WindWeather).
+  * It reads TEST_FCS/ and PC_FCS/, which nothing in the current pipeline writes.
+
+Current equivalents: score_cf.py (post-processor tiers) and
+WindAI/verification/score_power_configs.py (LAM direct vs power curve).
+"""
 import os
 import glob
 import numpy as np

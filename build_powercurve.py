@@ -1,4 +1,13 @@
 #!/usr/bin/env python3
+"""DEPRECATED -- per-farm era. The specs power curve now lives in the scorers.
+
+build_farm_curves() in score_cf.py and WindAI/verification/score_power_configs.py is the single
+source of truth for the specs curve, built from turbine_specs.csv + the fleet strings in
+farms.csv. This file predates those and is not wired into any current chain.
+
+NOTE: the calibrated replacement for the specs curve is not a script like this one -- it is the
+CERRA-tier converter built by Runner.py (fitted on analysis wind -> observed power).
+"""
 """
 PowerCurve baseline for ONE weather model, on the same test set as Testloop.py.
 

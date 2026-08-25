@@ -6,7 +6,12 @@ observations, on the run's own `test` inits only (the chronological hold-out fro
 
   DIRECT       the LAM's own `cf_lam`, reconstructed via G                              (solid)
   POWERCURVE   the LAM's ws100 pushed through each farm's specs power curve             (dashed)
-  TRANSFORMER  infer_cf.py's post-processed CF (model on wind + cf_lam + static), via G (dash-dot)
+  CERRA        one shared converter fitted on CERRA ANALYSIS wind -> observed cf over the LAM's
+               own training years, applied unchanged to every run's forecast wind. Never saw a
+               forecast, so it cannot favour a run: use THIS to compare runs' wind quality.
+  TRANSFORMER  infer_cf.py's post-processed CF (model on wind + cf_lam + static), via G (dash-dot).
+               One model PER RUN, so it absorbs each run's own bias -- good for "how well can this
+               run be post-processed", wrong for "whose wind is better".
 
 All three come from the SAME dataset_BE_<RUN>.nc, so they share the exact valid times, obs pairing
 and cell geometry — the comparison isolates whether post-processing the run's forecast beats using
@@ -40,6 +45,14 @@ SOURCE_RUNS = ["HighCapacityGT", "VanillaPowerGT", "VeryHighCapacityGT", "Regula
 # transformer forecasts to score: (cf file tag, source LAM run, method name in the plot).
 # 'transformer' = wind + cf_lam ; 'transformer_wo' = wind-only (dash-dot vs dotted).
 TRANSFORMERS = [
+    # CERRA tier: ONE converter (trained on CERRA analysis wind, 2020..2024-01) applied to each
+    # run's forecast wind. Same instrument for every run, so differences are purely the WIND --
+    # the calibrated replacement for the shared specs power curve. Files are cf_BE_<tag>@<run>.nc.
+    ("CERRAcell@HighCapacityGT",     "HighCapacityGT",     "cerra"),
+    ("CERRAcell@VanillaPowerGT",     "VanillaPowerGT",     "cerra"),
+    ("CERRAcell@VeryHighCapacityGT", "VeryHighCapacityGT", "cerra"),
+    ("CERRAcell@RegularWeather",     "RegularWeather",     "cerra"),
+    # forecast tier: one post-processor per run, trained on that run's own forecasts
     ("HighCapacityGT",        "HighCapacityGT",     "transformer"),
     ("VanillaPowerGT",        "VanillaPowerGT",     "transformer"),
     ("VeryHighCapacityGT",    "VeryHighCapacityGT", "transformer"),
@@ -53,17 +66,22 @@ SPLIT  = "test"                      # which split to report on
 OUT_DIR = Path("cf_scores")
 
 # which method families to score/plot (override on the CLI with --methods)
-METHODS = ["direct", "curve", "transformer", "transformer_wo"]
+# 'cerra' is the shared CERRA-fitted converter -- the one to use when the question is
+# "whose WIND is better"; the transformer_* families are per-run models and therefore absorb each
+# run's own biases, which compresses exactly the differences the cerra tier is there to measure.
+METHODS = ["direct", "curve", "cerra", "transformer", "transformer_wo"]
 
 # which season to restrict the scored inits to (by init month). "all" = no restriction.
-SEASON  = "JJA"
+SEASON  = "all"
 SEASONS = {"all": None, "DJF": {12, 1, 2}, "MAM": {3, 4, 5}, "JJA": {6, 7, 8}, "SON": {9, 10, 11}}
 # --------------------------------------------------
 
 FLEET_RE = re.compile(r"\s*(\d+)\s*x\s*(.+?)\s*$")
-METHOD_LABEL = {"direct": "direct", "curve": "power curve",
+METHOD_LABEL = {"direct": "direct", "curve": "power curve (specs)",
+                "cerra": "CERRA converter (shared)",
                 "transformer": "transformer (wind+cf_lam)", "transformer_wo": "transformer (wind-only)"}
-STYLE = {"direct": "-", "curve": "--", "transformer": "-.", "transformer_wo": ":"}
+STYLE = {"direct": "-", "curve": "--", "cerra": (0, (3, 1, 1, 1, 1, 1)),
+         "transformer": "-.", "transformer_wo": ":"}
 
 
 # =============================================================================
@@ -122,8 +140,8 @@ def main() -> None:
                     help="score each run on its OWN inits (default: intersect to common inits so "
                          "the cross-run comparison is on one identical sample)")
     ap.add_argument("--methods", nargs="+", default=METHODS,
-                    choices=["direct", "curve", "transformer", "transformer_wo"],
-                    help="which method families to include (default: all four)")
+                    choices=list(METHOD_LABEL),          # derived, so a new method needs one edit
+                    help=f"which method families to include (default: {' '.join(METHODS)})")
     ap.add_argument("--season", default=SEASON, choices=list(SEASONS),
                     help="restrict scored inits to a season by init month (default: all)")
     ap.add_argument("--cells-dir", type=Path, default=CELLS_DIR)
@@ -291,11 +309,15 @@ def main() -> None:
                     sd_p=sd_p, sd_o=sd_o, r=r, var_ratio=sd_p / sd_o if sd_o > 0 else np.nan)
 
     # ---- 1. total MAE by lead ----
+    # runs x methods gives well over ten columns; full labels ran off the line and the header
+    # became unreadable, so number the columns and print the legend above.
     print(f"\nTOTAL {args.region} power ({scope}) — MAE as % of {total_cap:.0f} MW")
-    hdr = "lead  " + "".join(f"{lbl(s):>28s}" for s in series)
+    for i, s in enumerate(series, 1):
+        print(f"  [{i:2d}] {lbl(s)}")
+    hdr = "lead  " + "".join(f"{f'[{i}]':>9s}" for i in range(1, len(series) + 1))
     print(hdr); print("-" * len(hdr))
     for li, lh in enumerate(leads):
-        print(f"+{lh:2d}h  " + "".join(f"{nmae_t[s][li]:27.2f}%" for s in series))
+        print(f"+{lh:2d}h  " + "".join(f"{nmae_t[s][li]:8.2f}%" for s in series))
 
     # ---- 2. summary pooled over leads ----
     print(f"\nSUMMARY — {args.region} total ({scope}), pooled over leads")

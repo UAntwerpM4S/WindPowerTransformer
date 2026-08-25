@@ -10,9 +10,20 @@ Two tiers, so we can answer both questions:
 
 Split: chronological 0.6 / 0.2 / 0.2 (train / early-stop / reported test). Then:
      python3 infer_cf.py   &&   python3 score_cf.py
+
+--datasets-only stops after step 1. The CERRA tier (Runner.py) needs dataset_BE_<run>.nc for
+every run but none of the per-run checkpoints, so that is the flag to use before Runner.py step 4.
 """
+import argparse
 import glob
 import os
+
+_ap = argparse.ArgumentParser(description=__doc__,
+                              formatter_class=argparse.RawDescriptionHelpFormatter)
+_ap.add_argument("--datasets-only", action="store_true",
+                 help="build dataset_<REGION>_<run>.nc for every source run, then stop "
+                      "(what the CERRA tier needs; no per-run models are trained)")
+ARGS = _ap.parse_args()
 
 CELLS_DIR  = "/mnt/weatherloss/WindPowerTransformer/data/cells"
 REGION     = "BE"
@@ -57,6 +68,10 @@ for src, (d, pv) in SOURCE_RUNS.items():
     run(f"python3 data/extract_cells.py --runs {src}={d} --region {REGION} "
         f"--power-var {pv} --out {CELLS_DIR}")
     run(f"python3 data/build_targets.py --cells {cells} --out {CELLS_DIR} --split-frac {SPLIT_FRAC}")
+
+if ARGS.datasets_only:
+    print(f"\n✅ datasets built in {CELLS_DIR}. Next:  python3 Runner.py")
+    raise SystemExit(0)
 
 # 2) one model per experiment ----------------------------------------------
 for tag, src, use_cf_lam in EXPERIMENTS:

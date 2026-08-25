@@ -15,7 +15,7 @@ so the 15 cells are identical across tiers.
 Output: cells_<REGION>_CERRA.nc
     dims   (init, lead_time, cell)  + (farm, cell)
     inputs ws100 ws10 wdir100_cos wdir100_sin wdir10_cos wdir10_sin        (NO cf_lam)
-    geom   G[farm, cell]  cap_cell[cell]  cell_lat  cell_lon  valid_time
+    geom   G[farm, cell]  cap_cell[cell]  turbinecount[cell]  cell_lat  cell_lon  valid_time
 
 Usage:
   python extract_cells_cerra.py                              # BE, 2020-01-01 .. 2025-07-31
