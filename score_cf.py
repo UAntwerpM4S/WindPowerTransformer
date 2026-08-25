@@ -56,7 +56,7 @@ OUT_DIR = Path("cf_scores")
 METHODS = ["direct", "curve", "transformer", "transformer_wo"]
 
 # which season to restrict the scored inits to (by init month). "all" = no restriction.
-SEASON  = "all"
+SEASON  = "JJA"
 SEASONS = {"all": None, "DJF": {12, 1, 2}, "MAM": {3, 4, 5}, "JJA": {6, 7, 8}, "SON": {9, 10, 11}}
 # --------------------------------------------------
 
