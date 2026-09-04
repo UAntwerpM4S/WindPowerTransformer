@@ -32,7 +32,7 @@ SPLIT_FRAC = "0.6 0.2 0.2"
 # source LAM run -> (inference dir, power var).  'none' = wind-only extraction.
 SOURCE_RUNS = {
     "HighCapacityGT":     ("/mnt/weatherloss/WindPower/inference/WPDistr/HighCapacityGT",     "capacityfactor"),
-    "VanillaPowerGT":     ("/mnt/weatherloss/WindPower/inference/WPDistr/VanillaPowerGT",     "capacityfactor"),
+    "VanillaPowerGT":     ("/mnt/weatherloss/WindPower/inference/WPDistr/VanillaCapacityGT",     "capacityfactor"),
     "VeryHighCapacityGT": ("/mnt/weatherloss/WindPower/inference/WPDistr/VeryHighCapacityGT", "capacityfactor"),
     "RegularWeather":     ("/mnt/weatherloss/WindPower/inference/WindAI/RegularWeather",      "none"),
 }

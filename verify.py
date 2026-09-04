@@ -21,11 +21,11 @@ import pandas as pd
 # ========= CONFIG =========
 MODEL_NAMES = [
     "RegularWeather",
-    "VanillaPowerGT",
-    "VanillaPowerTF",
-    "WindHeavyTinyPower",
-    "WindHeavyVanillaPower",
-    "WindWeather",
+  #  "VanillaPowerGT",
+   # "VanillaPowerTF",
+   # "WindHeavyTinyPower",
+   # "WindHeavyVanillaPower",
+   # "WindWeather",
 ]
 
 DIM = 128

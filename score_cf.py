@@ -63,6 +63,11 @@ TRANSFORMERS = [
 ]
 REGION = "BE"
 SPLIT  = "test"                      # which split to report on
+
+# Wind-regime edges in m/s, converted to capacity-factor thresholds through each farm's own power
+# curve, then applied to the OBSERVED power -- truth-conditioned, labelled in m/s so the bins match
+# score_power_configs.py and score_wpx_power.py exactly.
+REGIME_WS_EDGES = [4.5, 8.0, 12.0]
 OUT_DIR = Path("cf_scores")
 
 # which method families to score/plot (override on the CLI with --methods)
@@ -77,6 +82,20 @@ SEASONS = {"all": None, "DJF": {12, 1, 2}, "MAM": {3, 4, 5}, "JJA": {6, 7, 8}, "
 # --------------------------------------------------
 
 FLEET_RE = re.compile(r"\s*(\d+)\s*x\s*(.+?)\s*$")
+
+
+def cf_edges_from_ws(curve, capacity_mw, ws_edges):
+    """CF thresholds equivalent to wind-speed edges, for ONE power curve.
+
+    Identical to the helper in score_power_configs.py and score_wpx_power.py, so all three
+    scripts bin on the same boundaries and their regime tables are directly comparable.
+    """
+    cf = np.asarray([float(curve(np.asarray([e], dtype=float))[0]) / capacity_mw
+                     for e in ws_edges], dtype=float)
+    for i in range(1, len(cf)):
+        if cf[i] <= cf[i - 1]:
+            cf[i] = cf[i - 1] + 1e-9
+    return cf
 METHOD_LABEL = {"direct": "direct", "curve": "power curve (specs)",
                 "cerra": "CERRA converter (shared)",
                 "transformer": "transformer (wind+cf_lam)", "transformer_wo": "transformer (wind-only)"}
@@ -147,6 +166,8 @@ def main() -> None:
     ap.add_argument("--cells-dir", type=Path, default=CELLS_DIR)
     ap.add_argument("--transformer-dir", type=Path, default=TRANSFORMER_DIR)
     ap.add_argument("--wpower-dir", type=Path, default=WPOWER_DIR)
+    ap.add_argument("--regime-ws-edges", type=float, nargs="+", default=REGIME_WS_EDGES,
+                    help="interior wind-speed edges in m/s for the regime split (default 4.5 8 12)")
     ap.add_argument("--out", type=Path, default=OUT_DIR)
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
@@ -251,6 +272,19 @@ def main() -> None:
     F, L = len(farms), len(leads)
     series = [k for k in method_pred]
 
+    # ---- wind regimes: truth-conditioned, expressed in m/s ----
+    ws_edges = list(args.regime_ws_edges)
+    reg_labels = ([f"0-{ws_edges[0]:g}"]
+                  + [f"{ws_edges[i]:g}-{ws_edges[i+1]:g}" for i in range(len(ws_edges) - 1)]
+                  + [f"{ws_edges[-1]:g}+"])
+    R = len(reg_labels)
+    cf_thr_tot = cf_edges_from_ws(lambda ws: sum(curves[f](ws) for f in farms),
+                                  total_cap, ws_edges)
+    print(f"\nwind regimes: " + " | ".join(reg_labels) + "  m/s   (binned on OBSERVED power "
+          f"through the fleet curve)")
+    print("  fleet thresholds: "
+          + ", ".join(f"{e:g} m/s -> CF {c:.3f}" for e, c in zip(ws_edges, cf_thr_tot)))
+
     # ---- accumulators ----
     z2 = lambda: np.zeros((F, L))
     sae = {s: z2() for s in series}; sse = {s: z2() for s in series}
@@ -260,8 +294,13 @@ def main() -> None:
     sp_t = {s: np.zeros(L) for s in series}; so_t = {s: np.zeros(L) for s in series}
     spp_t = {s: np.zeros(L) for s in series}; soo_t = {s: np.zeros(L) for s in series}
     spo_t = {s: np.zeros(L) for s in series}
+    # regime split of the regional total: (L, R)
+    sae_tr = {s: np.zeros((L, R)) for s in series}
+    sse_tr = {s: np.zeros((L, R)) for s in series}
+    sbe_tr = {s: np.zeros((L, R)) for s in series}
+    n_tr = {s: np.zeros((L, R)) for s in series}
 
-    def accumulate(s, ppred, ptrue, k):
+    def accumulate(s, ppred, ptrue, k, rt=None):
         ok = np.isfinite(ptrue) & np.isfinite(ppred)
         if ok.any():
             e = ppred[ok] - ptrue[ok]
@@ -273,11 +312,18 @@ def main() -> None:
             sbe_t[s][k] += et;      n_t[s][k] += 1
             sp_t[s][k] += pt;   so_t[s][k] += ot
             spp_t[s][k] += pt * pt; soo_t[s][k] += ot * ot; spo_t[s][k] += pt * ot
+            if rt is not None:
+                sae_tr[s][k, rt] += abs(et); sse_tr[s][k, rt] += et * et
+                sbe_tr[s][k, rt] += et;      n_tr[s][k, rt] += 1
 
     for s, (P, obs, _test) in method_pred.items():
         for nidx in np.where(eff_mask[s[0]])[0]:
             for k in range(L):
-                accumulate(s, P[nidx, k], obs[nidx, k], k)
+                o = obs[nidx, k]
+                # regime from the OBSERVED fleet total, so every method shares the same bins
+                rt = (int(np.digitize(o.sum() / total_cap, cf_thr_tot))
+                      if np.isfinite(o).all() else None)
+                accumulate(s, P[nidx, k], o, k, rt)
 
     # ---- metrics ----
     with np.errstate(invalid="ignore", divide="ignore"):
@@ -434,6 +480,82 @@ def main() -> None:
             continue
         print(f"{lbl(s):36s} {np.sqrt(d['mse']):8.1f} {d['bias2']:9.0f} {d['amp']:9.0f} "
               f"{d['phase']:9.0f} {d['var_ratio']:7.3f} {d['r']:6.3f}")
+
+    # ---- wind-regime split, with the one-sidedness diagnostic ----
+    with np.errstate(invalid="ignore", divide="ignore"):
+        nmae_tr = {s_: 100.0 * (sae_tr[s_] / n_tr[s_]) / total_cap for s_ in series}
+
+    counts = n_tr[series[0]].sum(axis=0)
+    print(f"\nTOTAL {args.region} POWER BY WIND REGIME ({scope}) - MAE as % of {total_cap:.0f} MW")
+    for i, s_ in enumerate(series, 1):
+        print(f"  [{i:2d}] {lbl(s_)}")
+    hdr = (f"{'regime':>10s} {'n':>7s}"
+           + "".join(f"{f'[{i}]':>9s}" for i in range(1, len(series) + 1)))
+    print(hdr); print("-" * len(hdr))
+    for ri, rl in enumerate(reg_labels):
+        row = f"{rl:>10s} {int(counts[ri]):7d}"
+        for s_ in series:
+            N = n_tr[s_][:, ri].sum()
+            row += f"{(100.0 * sae_tr[s_][:, ri].sum() / N / total_cap) if N else np.nan:8.2f}%"
+        print(row)
+
+    print("\nBIAS BY WIND REGIME [MW;  + = over-predict]")
+    print(hdr); print("-" * len(hdr))
+    for ri, rl in enumerate(reg_labels):
+        row = f"{rl:>10s} {int(counts[ri]):7d}"
+        for s_ in series:
+            N = n_tr[s_][:, ri].sum()
+            row += f"{(sbe_tr[s_][:, ri].sum() / N) if N else np.nan:8.0f} "
+        print(row)
+
+    # |bias| / MAE == 1 means EVERY case errs the same way: not inaccuracy, but a forecast that
+    # cannot reach the state at all. Well below 1 the errors straddle the truth as they should.
+    print("\nONE-SIDEDNESS  |bias| / MAE   (1.00 = every case errs the same way)")
+    print(hdr); print("-" * len(hdr))
+    for ri, rl in enumerate(reg_labels):
+        row = f"{rl:>10s} {int(counts[ri]):7d}"
+        for s_ in series:
+            N = n_tr[s_][:, ri].sum()
+            m = sae_tr[s_][:, ri].sum() / N if N else np.nan
+            b = abs(sbe_tr[s_][:, ri].sum() / N) if N else np.nan
+            row += f"{(b / m if m else np.nan):9.3f}"
+        print(row)
+    print("  a value at 1.000 is a REPRESENTATIONAL limit, not a skill one: the forecast never")
+    print("  once lands on the other side of the observation.")
+
+    ncw_r = int(np.ceil(R / 2))
+    fig, axs = plt.subplots(2, ncw_r, figsize=(5.2 * ncw_r, 8.4), squeeze=False, sharex=True)
+    for ri in range(R):
+        axk = axs[ri // ncw_r][ri % ncw_r]
+        for s_ in series:
+            axk.plot(leads, nmae_tr[s_][:, ri], marker="o", ms=4, lw=1.7,
+                     color=colors[s_[0]], ls=STYLE[s_[1]], label=lbl(s_))
+        axk.set_title(f"{reg_labels[ri]} m/s   ({int(counts[ri])} valid times)", fontsize=10)
+        axk.set_xlabel("lead time [h]"); axk.set_ylabel(f"MAE [% of {total_cap:.0f} MW]")
+        axk.set_xticks(leads); axk.grid(ls="--", alpha=0.5)
+    for j in range(R, 2 * ncw_r):
+        axs[j // ncw_r][j % ncw_r].axis("off")
+    axs[0][0].legend(fontsize=6, ncol=2)
+    fig.suptitle(f"{args.region} total power MAE by wind regime ({scope})\n"
+                 f"regime set by OBSERVED power through the fleet power curve", fontsize=11)
+    fig.tight_layout()
+    pth = args.out / f"mae_regimes_{args.region}{sfx}.png"
+    fig.savefig(pth, dpi=140); plt.close(fig); print(f"\nsaved {pth}")
+
+    reg_rows = []
+    for s_ in series:
+        for ri, rl in enumerate(reg_labels):
+            for li, lh in enumerate(leads):
+                N = n_tr[s_][li, ri]
+                reg_rows.append(dict(run=s_[0], method=s_[1], regime=rl, lead_hours=lh,
+                                     scope="TOTAL",
+                                     mae_mw=sae_tr[s_][li, ri] / N if N else np.nan,
+                                     nmae_pct=nmae_tr[s_][li, ri],
+                                     rmse_mw=np.sqrt(sse_tr[s_][li, ri] / N) if N else np.nan,
+                                     bias_mw=sbe_tr[s_][li, ri] / N if N else np.nan, n=int(N)))
+    pth = args.out / f"scores_regimes_{args.region}{sfx}.csv"
+    pd.DataFrame(reg_rows).to_csv(pth, index=False)
+    print(f"saved {pth}")
 
     # ---- CSVs ----
     rows = []
