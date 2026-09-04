@@ -1,27 +1,32 @@
 #!/usr/bin/env python3
-"""Score the forecast-tier post-processors on the HELD-OUT TEST split — one model per run.
+"""Score the wind-power post-processor against its two curve baselines, on the held-out split.
 
-For each forecasting run, three power forecasts are reconstructed to farms and scored against the
-observations, on the run's own `test` inits only (the chronological hold-out from build_targets):
+Three ways of turning one MLWP wind forecast into farm power, scored on the SAME inits, the same
+valid times and the same cell geometry, so the comparison isolates the model and nothing else:
 
-  DIRECT       the LAM's own `cf_lam`, reconstructed via G                              (solid)
-  POWERCURVE   the LAM's ws100 pushed through each farm's specs power curve             (dashed)
-  CERRA        one shared converter fitted on CERRA ANALYSIS wind -> observed cf over the LAM's
-               own training years, applied unchanged to every run's forecast wind. Never saw a
-               forecast, so it cannot favour a run: use THIS to compare runs' wind quality.
-  TRANSFORMER  infer_cf.py's post-processed CF (model on wind + cf_lam + static), via G (dash-dot).
-               One model PER RUN, so it absorbs each run's own bias -- good for "how well can this
-               run be post-processed", wrong for "whose wind is better".
+  CURVE        forecast ws100 -> each farm's specs power curve. Nothing fitted; the datasheet
+               cubic. This is the "no post-processing" reference.                      (dashed)
+  MEASURED     forecast ws100 binned against observed power on the FIT_SPLIT, median per bin.
+               The simplest possible post-processor: a 1-D binned MOS.                 (dotted)
+  TRANSFORMER  infer_cf.py's post-processed CF, from the 6 wind variables + static features,
+               reconstructed to farms via G.                                            (solid)
 
-All three come from the SAME dataset_BE_<RUN>.nc, so they share the exact valid times, obs pairing
-and cell geometry — the comparison isolates whether post-processing the run's forecast beats using
-its raw power head or the physical power curve. Metrics per farm and for the regional total, by
-lead: MAE (MW and % of capacity), RMSE, BIAS, and the MSE bias/amplitude/phase decomposition.
+The ladder is deliberate. CURVE -> MEASURED is what ANY post-processing buys, holding the input
+at one variable. MEASURED -> TRANSFORMER is what six inputs and a learned nonlinearity buy on top,
+holding the training data fixed -- both are fitted on the same split of the same forecasts.
 
-    P(farm,t) = sum_cell G[farm,cell] * cf(cell,t)          (direct: cf=cf_lam; transformer: cf=model)
+    P(farm,t) = sum_cell G[farm,cell] * cf(cell,t)              (transformer)
+    P(farm,t) = curve_farm( capacity-weighted ws100 over the farm's cells )   (curve, measured)
 
-Usage:  python score_cf.py            # SETTINGS below
-        python score_cf.py --runs HighCapacityGT VanillaPowerGT
+power_obs is a 3 h MEAN. The specs curve is instantaneous and is therefore averaged over the
+adjacent lead pair; the measured curve was FITTED against that mean and is read directly. The
+last lead cannot form the window and is dropped from every method (DROP_LAST_LEAD).
+
+Metrics per farm and for the regional total, by lead: MAE (MW and % of capacity), RMSE, BIAS, and
+the MSE bias/amplitude/phase decomposition.
+
+Usage:  python score_cf.py                      # SETTINGS below
+        python score_cf.py --methods curve measured transformer
 """
 from __future__ import annotations
 
@@ -38,28 +43,13 @@ WPOWER_DIR = Path("/mnt/weatherloss/WindPower/data/WPDistr")
 CELLS_DIR  = Path("/mnt/weatherloss/WindPowerTransformer/data/cells")            # dataset_BE_<RUN>.nc
 TRANSFORMER_DIR = Path("/mnt/weatherloss/WindPowerTransformer/data/cf_forecasts")  # cf_BE_<RUN>.nc
 
-# LAM runs whose dataset_BE_<run>.nc supplies obs + direct (cf_lam) + power curve (ws100).
-# RegularWeather has no cf_lam -> it contributes a power curve + a wind-only transformer only.
-SOURCE_RUNS = ["HighCapacityGT", "VanillaPowerGT", "VeryHighCapacityGT", "RegularWeather"]
+# The MLWP run whose dataset_BE_<run>.nc supplies the forecast wind and the observations.
+# RegularWeather is weather-only: no power head, so nothing here depends on in-model power.
+SOURCE_RUNS = ["RegularWeather"]
 
-# transformer forecasts to score: (cf file tag, source LAM run, method name in the plot).
-# 'transformer' = wind + cf_lam ; 'transformer_wo' = wind-only (dash-dot vs dotted).
+# (cf file tag, source run, method name). One post-processor, trained on 6 wind variables.
 TRANSFORMERS = [
-    # CERRA tier: ONE converter (trained on CERRA analysis wind, 2020..2024-01) applied to each
-    # run's forecast wind. Same instrument for every run, so differences are purely the WIND --
-    # the calibrated replacement for the shared specs power curve. Files are cf_BE_<tag>@<run>.nc.
-    ("CERRAcell@HighCapacityGT",     "HighCapacityGT",     "cerra"),
-    ("CERRAcell@VanillaPowerGT",     "VanillaPowerGT",     "cerra"),
-    ("CERRAcell@VeryHighCapacityGT", "VeryHighCapacityGT", "cerra"),
-    ("CERRAcell@RegularWeather",     "RegularWeather",     "cerra"),
-    # forecast tier: one post-processor per run, trained on that run's own forecasts
-    ("HighCapacityGT",        "HighCapacityGT",     "transformer"),
-    ("VanillaPowerGT",        "VanillaPowerGT",     "transformer"),
-    ("VeryHighCapacityGT",    "VeryHighCapacityGT", "transformer"),
-    ("HighCapacityGT_wo",     "HighCapacityGT",     "transformer_wo"),
-    ("VanillaPowerGT_wo",     "VanillaPowerGT",     "transformer_wo"),
-    ("VeryHighCapacityGT_wo", "VeryHighCapacityGT", "transformer_wo"),
-    ("RegularWeather",        "RegularWeather",     "transformer_wo"),
+    ("RegularWeather", "RegularWeather", "transformer"),
 ]
 REGION = "BE"
 SPLIT  = "test"                      # which split to report on
@@ -70,11 +60,11 @@ SPLIT  = "test"                      # which split to report on
 REGIME_WS_EDGES = [4.5, 8.0, 12.0]
 OUT_DIR = Path("cf_scores")
 
-# which method families to score/plot (override on the CLI with --methods)
-# 'cerra' is the shared CERRA-fitted converter -- the one to use when the question is
-# "whose WIND is better"; the transformer_* families are per-run models and therefore absorb each
-# run's own biases, which compresses exactly the differences the cerra tier is there to measure.
-METHODS = ["direct", "curve", "cerra", "transformer", "transformer_wo"]
+# which methods to score/plot (override on the CLI with --methods). The three rungs:
+#   curve       datasheet cubic, nothing fitted            -- "no post-processing"
+#   measured    1-D binned MOS on forecast wind            -- the simplest post-processor
+#   transformer 6 wind variables, learned                  -- the proposed post-processor
+METHODS = ["curve", "measured", "transformer"]
 
 # which season to restrict the scored inits to (by init month). "all" = no restriction.
 SEASON  = "all"
@@ -96,11 +86,22 @@ def cf_edges_from_ws(curve, capacity_mw, ws_edges):
         if cf[i] <= cf[i - 1]:
             cf[i] = cf[i - 1] + 1e-9
     return cf
-METHOD_LABEL = {"direct": "direct", "curve": "power curve (specs)",
-                "cerra": "CERRA converter (shared)",
-                "transformer": "transformer (wind+cf_lam)", "transformer_wo": "transformer (wind-only)"}
-STYLE = {"direct": "-", "curve": "--", "cerra": (0, (3, 1, 1, 1, 1, 1)),
-         "transformer": "-.", "transformer_wo": ":"}
+METHOD_LABEL = {"curve": "specs power curve",
+                "measured": "measured curve (binned MOS)",
+                "transformer": "transformer (6 wind)"}
+STYLE = {"curve": "--", "measured": ":", "transformer": "-"}
+
+# The measured curve is fitted on this split -- the SAME one the transformer trains on, so the
+# ladder specs -> measured -> transformer holds the data fixed and varies only model class and
+# number of inputs.
+FIT_SPLIT = "train"
+MEAS_WS_EDGES = np.arange(0.0, 25.1, 0.5)   # 0.5 m/s bins
+MEAS_MIN_BIN  = 30                          # bins with fewer cases are dropped
+MEAS_STAT     = "median"                    # "median" or "mean"; see the note in fit_measured
+
+# power_obs is a 3 h MEAN and the last lead has no successor to average with, so the specs curve
+# is undefined there. Dropped for EVERY method, or they would be scored on different samples.
+DROP_LAST_LEAD = True
 
 
 # =============================================================================
@@ -141,11 +142,97 @@ def build_farm_curves(farms_df, specs, farms):
     return curves
 
 
-def farm_power_curve(ws100, G, curves, farms):
-    """ws100 (N,L,C) -> per-farm power (N,L,F) via capacity-weighted farm wind + specs curve."""
+def farm_wind(ws100, G):
+    """ws100 (N,L,C) -> capacity-weighted farm wind (N,L,F). Shared by every curve method."""
     w = G / G.sum(1, keepdims=True)                                    # (F,C) shares sum to 1
-    ws_farm = np.einsum("nlc,fc->nlf", ws100, w)                       # (N,L,F)
-    return np.stack([curves[f](ws_farm[:, :, i]) for i, f in enumerate(farms)], axis=-1)
+    return np.einsum("nlc,fc->nlf", ws100, w)
+
+
+def farm_power_curve(ws100, G, curves, farms):
+    """Specs curve -> per-farm power (N,L,F), averaged over the OBSERVATION's window.
+
+    power_obs at a valid time is the MEAN over [t, t+3h), while the specs curve is an
+    INSTANTANEOUS physical relation. Grading a snapshot against an average charges the curve an
+    error that is bookkeeping, not skill. Leads are 3 h apart, so the window is the adjacent pair
+    (l, l+1) and the POWERS are averaged -- not the winds, because the curve is cubic on the ramp
+    and A(mean ws) != mean A(ws).
+
+    The last lead has no successor and comes back NaN; DROP_LAST_LEAD removes it from every other
+    method too, so all methods stay on one identical sample.
+    """
+    ws_farm = farm_wind(ws100, G)
+    P = np.stack([curves[f](ws_farm[:, :, i]) for i, f in enumerate(farms)], axis=-1)
+    out = np.full_like(P, np.nan)
+    out[:, :-1, :] = 0.5 * (P[:, :-1, :] + P[:, 1:, :])
+    return out
+
+
+
+def fit_measured(ws100, G, obs, fit_mask, farms, cap, quiet=False):
+    """The MEASURED curve: bin observed farm power on FORECAST wind over the fit split.
+
+    This is the simplest possible post-processor -- a 1-D binned MOS. The binning itself is the
+    method of bins (IEC 61400-12-1); what makes it a post-processor rather than a power curve is
+    that it is fitted on FORECAST wind, so it absorbs the forecast's own bias. Fitting it on
+    reanalysis instead would make it a conversion function and the comparison would not be
+    like-for-like.
+
+    Fitted on the SAME split the transformer trains on, so specs -> measured -> transformer holds
+    the data fixed and varies only the model class and the number of inputs.
+
+    POOLED OVER LEAD on purpose. Forecast bias grows with lead, and a per-lead fit would learn
+    that too -- which is exactly what the transformer gets from its temporal attention. Pooling
+    keeps lead-awareness on the transformer's side of the ledger. State which you used; a per-lead
+    variant is a fair robustness check and would tell you how much of the transformer's margin is
+    lead-dependence rather than the six inputs.
+
+    Returns farm -> callable(ws) -> MW. Below the lowest populated bin the farm is not producing;
+    above the highest the curve holds its last value. Neither extrapolates into winds the record
+    does not cover.
+    """
+    agg = np.median if MEAS_STAT == "median" else np.mean
+    mid = 0.5 * (MEAS_WS_EDGES[:-1] + MEAS_WS_EDGES[1:])
+    ws_farm = farm_wind(ws100, G)
+    out = {}
+    if not quiet:
+        print(f"\nMeasured curves: method of bins on the '{FIT_SPLIT}' split, FORECAST wind, "
+              f"{MEAS_STAT} of each {MEAS_WS_EDGES[1] - MEAS_WS_EDGES[0]:.1f} m/s bin, "
+              f"pooled over lead")
+        print(f"  {'farm':14s} {'cases':>8s} {'bins':>5s} {'ws range':>13s} {'plateau':>10s} "
+              f"{'of nameplate':>13s}")
+    for i, f in enumerate(farms):
+        x = ws_farm[fit_mask, :, i].ravel()
+        y = obs[fit_mask, :, i].ravel()
+        m = np.isfinite(x) & np.isfinite(y)
+        idx = np.digitize(x[m], MEAS_WS_EDGES) - 1
+        yv = y[m]
+        val = np.full(mid.size, np.nan)
+        for b in range(mid.size):
+            k = idx == b
+            if k.sum() >= MEAS_MIN_BIN:
+                val[b] = agg(yv[k])
+        use = np.isfinite(val)
+        if use.sum() < 6:
+            raise SystemExit(f"{f}: only {int(use.sum())} bins with >= {MEAS_MIN_BIN} cases on "
+                             f"the '{FIT_SPLIT}' split -- too little data to fit a measured curve")
+        xs, ys = mid[use], val[use]
+        out[f] = lambda ws, xs=xs, ys=ys: np.interp(np.asarray(ws, float), xs, ys,
+                                                    left=0.0, right=ys[-1])
+        if not quiet:
+            print(f"  {f:14s} {int(m.sum()):8d} {int(use.sum()):5d} "
+                  f"{xs[0]:5.1f}-{xs[-1]:5.1f} {ys.max():9.1f}MW "
+                  f"{100 * ys.max() / float(cap[f]):12.1f}%")
+    return out
+
+
+def apply_measured(ws100, G, mcurves, farms):
+    """Measured curve -> per-farm power (N,L,F). NO window averaging.
+
+    Unlike the specs curve this one was FITTED as (instantaneous forecast wind -> 3 h-mean power),
+    so the window mismatch is already inside it. Averaging again would smooth the ramp twice.
+    """
+    ws_farm = farm_wind(ws100, G)
+    return np.stack([mcurves[f](ws_farm[:, :, i]) for i, f in enumerate(farms)], axis=-1)
 
 
 # =============================================================================
@@ -181,7 +268,7 @@ def main() -> None:
     specs = pd.read_csv(args.wpower_dir / "turbine_specs.csv")
     specs = specs.rename(columns={specs.columns[0]: "turbine_type"}).set_index("turbine_type")
 
-    # ---- per source run: dataset gives obs + direct(cf_lam) + power curve; store for transformers ----
+    # ---- the run's dataset supplies obs + forecast wind; both curves are built from it ----
     farms = leads = cap_np = None
     total_cap = 0.0
     curves = None
@@ -214,12 +301,20 @@ def main() -> None:
         runs_data[run] = dict(G=G, obs=obs, test=test, init=init)
         present_runs.append(run)
 
-        if "cf_lam" in ds and "direct" in enabled:
-            method_pred[(run, "direct")] = (np.einsum("nlc,fc->nlf", ds["cf_lam"].values, G),
-                                            obs, test)
         if "curve" in enabled:
             method_pred[(run, "curve")] = (farm_power_curve(ds["ws100"].values, G, curves, farms),
                                            obs, test)
+        if "measured" in enabled:
+            fit = ds["split"].values.astype(str) == FIT_SPLIT
+            if not fit.any():
+                raise SystemExit(f"{run}: no inits in split '{FIT_SPLIT}' -- cannot fit the "
+                                 f"measured curve")
+            if FIT_SPLIT == args.split:
+                raise SystemExit(f"the measured curve would be fitted on '{FIT_SPLIT}' and scored "
+                                 f"on '{args.split}' -- in-sample, so the baseline means nothing")
+            mcurves = fit_measured(ds["ws100"].values, G, obs, fit, farms, cap)
+            method_pred[(run, "measured")] = (apply_measured(ds["ws100"].values, G, mcurves, farms),
+                                              obs, test)
         n_te = int(test.sum())
         print(f"{run:22s} {len(init):5d} inits, {n_te} in '{args.split}'  "
               f"({init[test].min():%Y-%m-%d}..{init[test].max():%Y-%m-%d})" if n_te else
@@ -247,6 +342,15 @@ def main() -> None:
 
     if not method_pred:
         raise SystemExit("nothing to score -- no dataset_*.nc found")
+
+    # ---- the specs curve needs the NEXT lead to form the observation's 3 h window, so it is
+    # undefined at the last one. Drop that lead from EVERY method or they are scored on different
+    # samples there. (It also removes the known transformer edge artifact at +36 h.) ----
+    if DROP_LAST_LEAD:
+        for _P, _o, _t in method_pred.values():
+            _P[:, -1, :] = np.nan
+        print(f"\nDropped the last lead ({leads[-1]} h) from every method -- the specs curve "
+              f"cannot form the observation window there.")
 
     # ---- one identical sample across runs: intersect the scored inits (default) ----
     def in_season(run):
@@ -397,7 +501,7 @@ def main() -> None:
                 color=colors[s[0]], ls=STYLE[s[1]], label=lbl(s))
     ax.set(xlabel="lead time [h]", ylabel="MAE [% of total capacity]",
            title=f"Total {args.region} power ({scope}) — {F} farms, {total_cap:.0f} MW\n"
-                 f"solid = direct, dashed = power curve, dash-dot = transformer")
+                 f"solid = transformer, dashed = specs curve, dotted = measured curve")
     ax.set_xticks(leads); ax.grid(ls="--", alpha=0.5); ax.legend(fontsize=8)
     fig.tight_layout()
     p = args.out / f"mae_total_{args.region}{sfx}.png"

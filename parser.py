@@ -36,7 +36,7 @@ def get_args():
 
     # Checkpointing
     parser.add_argument("--ckpt_dir", type=str, default="checkpoints")
-    parser.add_argument("--run_tag", type=str, default="CERRAcell")
+    parser.add_argument("--run_tag", type=str, default="RegularWeather")
 
     # ---- data: the self-contained dataset_*.nc from build_targets.py ----
     # (splits and the cf_obs target live IN this file; the loader just reads them)

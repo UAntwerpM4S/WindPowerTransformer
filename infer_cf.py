@@ -1,35 +1,12 @@
 #!/usr/bin/env python3
-"""INFERENCE: apply a trained cell-level post-processor to a dataset -> CF forecasts.
+"""Apply the trained post-processor to the run's forecast wind and write cf_<REGION>_<tag>.nc.
 
-TWO WAYS TO USE THIS, both driven by the EXPERIMENTS table below, whose rows are
-(checkpoint tag, source dataset run, use_cf_lam) -- the tag and the dataset are DECOUPLED:
+One experiment: the transformer trained by run.py on 6 wind variables + static features, applied
+to the forecasts in dataset_<REGION>_<run>.nc. Output feeds score_cf.py.
 
-  FORECAST TIER (tag == source run).  One model per forecasting run, trained on that run's own
-  forecasts, conditioning on its `cf_lam` alongside the 6 wind vars + 3 static features. Answers
-  "can a post-processor improve THIS run's power forecast".
-
-  CERRA TIER (tag = CERRAcell, source run = each LAM run, use_cf_lam=False).  ONE converter,
-  fitted on CERRA ANALYSIS wind -> observed cf over the LAM's own training years (2020..2024-01),
-  applied UNCHANGED to every run's forecast wind. It has never seen a forecast, so it cannot
-  favour any run -- it is a calibrated replacement for the shared specs power curve, and the
-  differences it reports between runs are purely differences in the WIND. This is the
-  measuring-instrument use; see Runner.py for the chain that produces the checkpoint.
-
-  For the CERRA tier `use_cf_lam` MUST be False: the converter was trained on 6 wind + 3 static,
-  so feeding a 7th cf_lam channel would not match the checkpoint (guarded below).
-
-It writes, per row:
-
-    cf_BE_<tag>.nc                 when tag == source run
-    cf_BE_<tag>@<source run>.nc    when they differ (so CERRA rows do not overwrite each other)
-      cf          (init, lead_time, cell)   predicted capacity factor in [0,1]   <- the product
-      split       (init)                    train/val/test  (score_cf.py reports on 'test')
-      G, cap_cell, cell_lat/lon, valid_time, farm
-
-Predicts EVERY init (cheap); score_cf.py filters to the held-out 'test' split. The model attends
-over the full 3..36 h window, which is exactly how the dataset is laid out, so nothing is dropped.
-
-Edit SETTINGS, then:  python infer_cf.py
+EXPERIMENTS entries are (checkpoint tag, source dataset run, use_cf_lam). use_cf_lam is False
+throughout -- this report post-processes wind only, and the checkpoint's input_dim would not
+match a 7th channel anyway (guarded below).
 """
 from __future__ import annotations
 
@@ -59,19 +36,7 @@ CKPT_DIR   = Path("checkpoints")
 #                that run's dataset, just dropping cf_lam)
 #   use_cf_lam = 6 wind + cf_lam + static (True) vs wind-only 6 wind + static (False)
 EXPERIMENTS = [
-    # --- CERRA tier: ONE converter (Runner.py) applied to every run's forecast wind ---------
-    ("CERRAcell",             "HighCapacityGT",     False),
-    ("CERRAcell",             "VanillaPowerGT",     False),
-    ("CERRAcell",             "VeryHighCapacityGT", False),
-    ("CERRAcell",             "RegularWeather",     False),
-    # --- forecast tier: one post-processor per run, trained on that run's own forecasts ------
-    ("HighCapacityGT",        "HighCapacityGT",     True),
-    ("VanillaPowerGT",        "VanillaPowerGT",     True),
-    ("VeryHighCapacityGT",    "VeryHighCapacityGT", True),
-    ("HighCapacityGT_wo",     "HighCapacityGT",     False),   # wind-only variants
-    ("VanillaPowerGT_wo",     "VanillaPowerGT",     False),
-    ("VeryHighCapacityGT_wo", "VeryHighCapacityGT", False),
-    ("RegularWeather",        "RegularWeather",     False),   # pure weather model (no cf_lam)
+    ("RegularWeather", "RegularWeather", False),
 ]
 REGION = "BE"
 
@@ -179,7 +144,7 @@ def main():
                     help="warn instead of aborting when the dataset's cells do not match the "
                          "cells the checkpoint was trained on")
     ap.add_argument("--only", nargs="+", default=None, metavar="TAG",
-                    help="run only these EXPERIMENTS tags (e.g. --only CERRAcell)")
+                    help="run only these EXPERIMENTS tags (e.g. --only RegularWeather)")
     ap.add_argument("--kfold", type=int, default=0,
                     help="assemble out-of-fold predictions from K per-fold models <tag>_f0..f{K-1}")
     args = ap.parse_args()
